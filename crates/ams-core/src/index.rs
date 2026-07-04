@@ -249,7 +249,7 @@ impl Index {
         }
 
         if stats.parsed > 0 || stats.removed > 0 {
-            resolve_imports(&tx)?;
+            resolve_imports(&tx, &self.root)?;
         }
         tx.commit()?;
         Ok(stats)
@@ -740,13 +740,18 @@ fn split_ident(name: &str) -> String {
 }
 
 /// Resolve import targets to indexed files. JS/TS `./relative`, Python
-/// dotted/relative modules, Rust `crate::` paths. Go module paths need
-/// go.mod context and stay unresolved for now.
-fn resolve_imports(tx: &rusqlite::Transaction) -> Result<()> {
+/// dotted/relative modules, Rust `crate::` paths, PHP relative paths and
+/// PSR-4 namespaces (composer.json). Go module paths need go.mod context
+/// and stay unresolved for now.
+fn resolve_imports(tx: &rusqlite::Transaction, root: &Path) -> Result<()> {
     let files: HashMap<String, i64> = tx
         .prepare("SELECT path, id FROM files")?
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
+
+    let psr4 = std::fs::read_to_string(root.join("composer.json"))
+        .map(|text| parse_psr4(&text))
+        .unwrap_or_default();
 
     let rows: Vec<(i64, String, String, String)> = tx
         .prepare(
@@ -760,7 +765,7 @@ fn resolve_imports(tx: &rusqlite::Transaction) -> Result<()> {
         let resolved = match lang.as_str() {
             "py" => resolve_python(&files, &from, &target),
             "rs" => resolve_rust(&files, &target),
-            "php" => resolve_php(&files, &from, &target),
+            "php" => resolve_php(&files, &from, &target, &psr4),
             _ if target.starts_with('.') => resolve_relative(&files, &from, &target),
             _ => None,
         };
@@ -820,14 +825,73 @@ fn resolve_python(files: &HashMap<String, i64>, from: &str, target: &str) -> Opt
 }
 
 /// `require '../lib/foo.php'` / `require './foo.php'` resolve as relative
-/// file paths. `use Foo\Bar;` namespace imports need PSR-4 mapping (composer
-/// autoload config) that isn't parsed yet, so they stay unresolved.
-fn resolve_php(files: &HashMap<String, i64>, from: &str, target: &str) -> Option<i64> {
+/// file paths. `use Foo\Bar;` namespace imports resolve through the PSR-4
+/// map from composer.json; namespaces outside the map (vendor, classmap,
+/// PSR-0) stay unresolved.
+fn resolve_php(
+    files: &HashMap<String, i64>,
+    from: &str,
+    target: &str,
+    psr4: &[(String, Vec<String>)],
+) -> Option<i64> {
     if target.contains('/') || target.ends_with(".php") {
-        resolve_relative(files, from, target)
-    } else {
-        None
+        return resolve_relative(files, from, target);
     }
+    let fqn = target.trim_start_matches('\\');
+    for (prefix, dirs) in psr4 {
+        let Some(rest) = fqn.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        let rel = rest.replace('\\', "/");
+        for dir in dirs {
+            let dir = dir.trim_start_matches("./").trim_end_matches('/');
+            let candidate = if dir.is_empty() {
+                format!("{rel}.php")
+            } else {
+                format!("{dir}/{rel}.php")
+            };
+            if let Some(id) = files.get(&candidate) {
+                return Some(*id);
+            }
+        }
+    }
+    None
+}
+
+/// PSR-4 prefix → source dirs from composer.json `autoload` and
+/// `autoload-dev`. Prefixes are normalized to end with `\` and sorted
+/// longest-first so the most specific namespace wins.
+fn parse_psr4(composer_json: &str) -> Vec<(String, Vec<String>)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(composer_json) else {
+        return Vec::new();
+    };
+    let mut map: Vec<(String, Vec<String>)> = Vec::new();
+    for section in ["autoload", "autoload-dev"] {
+        let Some(psr4) = v
+            .get(section)
+            .and_then(|s| s.get("psr-4"))
+            .and_then(|p| p.as_object())
+        else {
+            continue;
+        };
+        for (prefix, dirs) in psr4 {
+            let dirs: Vec<String> = match dirs {
+                serde_json::Value::String(s) => vec![s.clone()],
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .filter_map(|d| d.as_str().map(str::to_string))
+                    .collect(),
+                _ => continue,
+            };
+            let mut prefix = prefix.trim_start_matches('\\').to_string();
+            if !prefix.is_empty() && !prefix.ends_with('\\') {
+                prefix.push('\\');
+            }
+            map.push((prefix, dirs));
+        }
+    }
+    map.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    map
 }
 
 fn resolve_rust(files: &HashMap<String, i64>, target: &str) -> Option<i64> {
@@ -866,4 +930,36 @@ fn normalize(p: &Path) -> PathBuf {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn psr4_map_and_lookup() {
+        let composer = r#"{
+            "autoload": {"psr-4": {
+                "App\\": "src/",
+                "App\\Legacy\\": ["legacy/", "compat/"]
+            }},
+            "autoload-dev": {"psr-4": {"App\\Tests\\": "tests"}}
+        }"#;
+        let psr4 = parse_psr4(composer);
+        // longest prefix first: App\Tests\ and App\Legacy\ before App\
+        assert_eq!(psr4[0].0, "App\\Legacy\\");
+        assert_eq!(psr4.last().unwrap().0, "App\\");
+
+        let mut files = HashMap::new();
+        files.insert("src/Service/Mailer.php".to_string(), 1_i64);
+        files.insert("compat/Old.php".to_string(), 2_i64);
+        files.insert("tests/MailerTest.php".to_string(), 3_i64);
+
+        let r = |t: &str| resolve_php(&files, "src/App.php", t, &psr4);
+        assert_eq!(r("App\\Service\\Mailer"), Some(1));
+        assert_eq!(r("\\App\\Service\\Mailer"), Some(1)); // fully qualified
+        assert_eq!(r("App\\Legacy\\Old"), Some(2)); // second dir of the array
+        assert_eq!(r("App\\Tests\\MailerTest"), Some(3)); // autoload-dev
+        assert_eq!(r("Vendor\\Pkg\\Thing"), None); // outside the map
+    }
 }
