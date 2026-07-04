@@ -137,11 +137,18 @@ fn collect_top(
                 let Some(name_node) = decl.child_by_field_name("name") else {
                     continue;
                 };
+                let value = decl.child_by_field_name("value");
+                // const x = require("mod") is an import, not a constant
+                if let Some(v) = value {
+                    if let Some(target) = require_target(v, src) {
+                        out.imports.push(target);
+                        continue;
+                    }
+                }
                 if name_node.kind() != "identifier" {
                     continue; // destructuring patterns
                 }
                 let name = node_text(src, name_node).to_string();
-                let value = decl.child_by_field_name("value");
                 let is_fn = value.map_or(false, |v| {
                     matches!(v.kind(), "arrow_function" | "function_expression" | "function")
                 });
@@ -167,6 +174,68 @@ fn collect_top(
                 });
             }
         }
+        // CommonJS: module.exports = {...} / exports.foo = ...
+        "expression_statement" => {
+            let Some(expr) = node.named_child(0) else {
+                return;
+            };
+            if expr.kind() != "assignment_expression" {
+                return;
+            }
+            let (Some(left), Some(right)) = (
+                expr.child_by_field_name("left"),
+                expr.child_by_field_name("right"),
+            ) else {
+                return;
+            };
+            let left_text = node_text(src, left);
+            if left_text == "module.exports" {
+                match right.kind() {
+                    "object" => {
+                        let mut c = right.walk();
+                        for prop in right.named_children(&mut c) {
+                            match prop.kind() {
+                                "shorthand_property_identifier" => {
+                                    named_exports.insert(node_text(src, prop).to_string());
+                                }
+                                "pair" => {
+                                    if let Some(v) = prop.child_by_field_name("value") {
+                                        if v.kind() == "identifier" {
+                                            named_exports
+                                                .insert(node_text(src, v).to_string());
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    "identifier" => {
+                        named_exports.insert(node_text(src, right).to_string());
+                    }
+                    _ => {}
+                }
+            } else if left_text.starts_with("exports.")
+                || left_text.starts_with("module.exports.")
+            {
+                let prop = left_text.rsplit('.').next().unwrap().to_string();
+                if matches!(right.kind(), "arrow_function" | "function_expression" | "function") {
+                    let (start, end) = line_span(node);
+                    out.symbols.push(ParsedSymbol {
+                        name: prop,
+                        kind: SymbolKind::Function,
+                        signature: signature(src, node, right.child_by_field_name("body")),
+                        start_line: start,
+                        end_line: end,
+                        exported: true,
+                        body_hash: body_hash(src, node),
+                        children: vec![],
+                    });
+                } else if right.kind() == "identifier" {
+                    named_exports.insert(node_text(src, right).to_string());
+                }
+            }
+        }
         // namespace Foo { ... }
         "module" | "internal_module" => {
             if let Some(mut sym) = simple_symbol(node, src, SymbolKind::Module, exported) {
@@ -183,6 +252,33 @@ fn collect_top(
             }
         }
         _ => {}
+    }
+}
+
+/// `require("mod")` (possibly behind member access like `require("m").sub`).
+fn require_target(value: Node, src: &str) -> Option<String> {
+    let call = match value.kind() {
+        "call_expression" => value,
+        "member_expression" => {
+            let obj = value.child_by_field_name("object")?;
+            if obj.kind() == "call_expression" {
+                obj
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    let f = call.child_by_field_name("function")?;
+    if f.kind() != "identifier" || node_text(src, f) != "require" {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    let arg = args.named_child(0)?;
+    if arg.kind() == "string" {
+        Some(unquote(node_text(src, arg)))
+    } else {
+        None
     }
 }
 

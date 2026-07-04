@@ -27,6 +27,9 @@ enum Cmd {
     Build {
         /// Project root (default: current directory)
         path: Option<PathBuf>,
+        /// Reparse everything, ignoring mtime/hash fast paths
+        #[arg(long)]
+        force: bool,
     },
     /// Show signatures of a file or directory, with @start-end line spans
     Describe {
@@ -67,6 +70,11 @@ enum Cmd {
 }
 
 fn main() {
+    // Die quietly on `ams ... | head` instead of panicking on broken pipe.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     if let Err(e) = run() {
         eprintln!("ams: {e:#}");
         std::process::exit(1);
@@ -76,9 +84,12 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Cmd::Build { path } = &cli.cmd {
+    if let Cmd::Build { path, force } = &cli.cmd {
         let root = path.clone().unwrap_or(std::env::current_dir()?);
         let mut idx = Index::create(&root)?;
+        if *force {
+            idx.clear_files()?;
+        }
         let stats = idx.sync()?;
         if cli.json {
             println!(

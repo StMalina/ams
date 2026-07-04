@@ -53,8 +53,9 @@ pub fn tree(entries: &[TreeEntry]) -> String {
     let mut out = String::new();
     for e in entries {
         out.push_str(&format!(
-            "{:<w$}  {:>5} loc  api:{:<3} used-by:{:<3}",
+            "{:<w$}  {:>4} {:>5} loc  api:{:<3} used-by:{:<3}",
             e.path,
+            e.lang,
             e.loc,
             e.api_count,
             e.used_by_count,

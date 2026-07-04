@@ -30,6 +30,7 @@ dependencies = [
  "ams-core",
  "anyhow",
  "clap",
+ "libc",
  "serde_json",
 ]
 

@@ -1,0 +1,72 @@
+<!--
+AMS snippet for agents without a plugin system (Codex, Gemini CLI, etc).
+Paste this section into your project's AGENTS.md.
+-->
+
+## Code navigation: use `ams`, not Read/Grep, for structure
+
+This project can be indexed by `ams` (AI Module Signatures) — a CLI that
+turns the codebase into compact symbol signatures with exact line spans, so
+you don't have to read whole files to find your way around.
+
+Check once per session:
+
+```bash
+which ams || cargo install --path crates/ams-cli   # install from the ams repo
+ls .ams/index.db 2>/dev/null || ams build            # build the index if missing
+```
+
+Every `ams` command self-heals (reparses changed files on each call), so the
+index is never stale. Workflow:
+
+1. **Unfamiliar file → `ams describe <file>`**, not `Read`:
+   ```
+   $ ams describe src/auth.ts
+   src/auth.ts [25 loc, ts]
+     function validateToken(token: string): User | null  @4-8 exported
+     class AuthService  @12-21 exported
+       async login(creds: Credentials): Promise<Session>  @13-16
+         doc: создаёт сессию после проверки токена
+     imports: jwt, ./cache
+   ```
+
+2. **Where is symbol X defined? → `ams find X`**, not `Grep`:
+   ```
+   $ ams find validateToken
+   src/auth.ts:4-8  [fn] validateToken exported
+     function validateToken(token: string): User | null
+   ```
+   Filters: `--kind fn|method|class|struct|enum|trait|interface|const|type|mod`, `--exported`.
+
+3. **Who calls X? → `ams refs X`**:
+   ```
+   $ ams refs validateToken
+   src/auth.ts: 4, 55, 102
+   ```
+
+4. **Directory overview → `ams tree <dir>`** instead of Glob + many Reads:
+   ```
+   $ ams tree src/
+   src/ [14 files]
+     auth.ts      820 loc  api:8   used-by:12  jwt,redis
+   ```
+
+5. **Deps/reverse-deps of a file → `ams related <file>`**.
+
+6. **Reading an actual implementation → `Read` with the span** you got from
+   `describe`/`find` (e.g. `@13-16` → `Read` with offset=13, limit=4). Don't
+   read the whole file when you only need one function's body.
+
+7. **Learned something non-obvious about a symbol → record it:**
+   ```bash
+   ams annotate src/auth.ts:AuthService.login "creates a session only after 2FA check passes"
+   ```
+   The note is tied to the symbol body's hash; it survives reindexing and
+   shows up in `describe` as `doc: ...`, marked `[stale]` if the body later changes.
+
+**`ams` does not replace text/regex search.** Searching for a string, log
+line, or config value is still a job for `rg`/`grep` — `ams` only indexes
+code structure (symbols, signatures, imports, identifier references).
+
+Supported languages: TypeScript/TSX, JavaScript/JSX, Rust, Python, Go.
+Global flag `--json` gives machine-readable output for any command.

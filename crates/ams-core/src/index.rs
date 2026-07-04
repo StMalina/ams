@@ -139,6 +139,12 @@ impl Index {
         Ok(())
     }
 
+    /// Drop all indexed data (annotations survive); next sync reparses from scratch.
+    pub fn clear_files(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM files", [])?;
+        Ok(())
+    }
+
     /// Bring the index in line with the filesystem. Cheap when nothing changed
     /// (stat-only walk); reparses only files whose mtime+size or hash differ.
     pub fn sync(&mut self) -> Result<SyncStats> {
@@ -203,6 +209,9 @@ impl Index {
                 Ok(s) => s,
                 Err(_) => continue, // non-UTF8 or unreadable
             };
+            if is_generated(&source, size) {
+                continue; // minified bundles / huge generated files
+            }
             let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
             if let Some((_, _, db_hash)) = known.get(&rel) {
                 if *db_hash == hash {
@@ -218,7 +227,7 @@ impl Index {
             let parsed = parser
                 .parse(&source)
                 .with_context(|| format!("parse failed: {rel}"))?;
-            upsert_file(&tx, &rel, parser.lang_id(), &parsed, &hash, mtime, size)?;
+            upsert_file(&tx, &rel, ext, &parsed, &hash, mtime, size)?;
             stats.parsed += 1;
         }
 
@@ -609,23 +618,30 @@ fn insert_symbol(
     Ok(())
 }
 
-/// Resolve `./relative` import targets to indexed files (JS/TS style).
+/// Resolve import targets to indexed files. JS/TS `./relative`, Python
+/// dotted/relative modules, Rust `crate::` paths. Go module paths need
+/// go.mod context and stay unresolved for now.
 fn resolve_imports(tx: &rusqlite::Transaction) -> Result<()> {
     let files: HashMap<String, i64> = tx
         .prepare("SELECT path, id FROM files")?
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
-    let rows: Vec<(i64, String, String)> = tx
+    let rows: Vec<(i64, String, String, String)> = tx
         .prepare(
-            "SELECT i.rowid, f.path, i.target FROM imports i
-             JOIN files f ON f.id = i.file_id WHERE i.target LIKE '.%'",
+            "SELECT i.rowid, f.path, i.target, f.lang FROM imports i
+             JOIN files f ON f.id = i.file_id",
         )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
-    for (rowid, from, target) in rows {
-        let resolved = resolve_relative(&files, &from, &target);
+    for (rowid, from, target, lang) in rows {
+        let resolved = match lang.as_str() {
+            "py" => resolve_python(&files, &from, &target),
+            "rs" => resolve_rust(&files, &target),
+            _ if target.starts_with('.') => resolve_relative(&files, &from, &target),
+            _ => None,
+        };
         tx.execute(
             "UPDATE imports SET resolved_file_id = ?1 WHERE rowid = ?2",
             params![resolved, rowid],
@@ -644,6 +660,62 @@ fn resolve_relative(files: &HashMap<String, i64>, from: &str, target: &str) -> O
         candidates.push(format!("{joined}/index.{ext}"));
     }
     candidates.iter().find_map(|c| files.get(c).copied())
+}
+
+fn resolve_python(files: &HashMap<String, i64>, from: &str, target: &str) -> Option<i64> {
+    let lookup = |module_path: &str| -> Option<i64> {
+        if module_path.is_empty() {
+            return None;
+        }
+        files
+            .get(&format!("{module_path}.py"))
+            .or_else(|| files.get(&format!("{module_path}/__init__.py")))
+            .copied()
+    };
+    let dots = target.chars().take_while(|c| *c == '.').count();
+    if dots > 0 {
+        // from .foo / ..foo import x — walk up (dots-1) from the file's package
+        let rest = &target[dots..];
+        let mut base = Path::new(from).parent().unwrap_or(Path::new(""));
+        for _ in 1..dots {
+            base = base.parent().unwrap_or(Path::new(""));
+        }
+        let mut p = base.to_string_lossy().replace('\\', "/");
+        if !rest.is_empty() {
+            if !p.is_empty() {
+                p.push('/');
+            }
+            p.push_str(&rest.replace('.', "/"));
+        }
+        lookup(&p)
+    } else {
+        // absolute module: try repo root and common source roots
+        let as_path = target.replace('.', "/");
+        ["", "src/", "lib/"]
+            .iter()
+            .find_map(|prefix| lookup(&format!("{prefix}{as_path}")))
+    }
+}
+
+fn resolve_rust(files: &HashMap<String, i64>, target: &str) -> Option<i64> {
+    let path = target.strip_prefix("crate::")?;
+    // use crate::a::b::Item — Item may be a symbol, not a module; try both depths
+    let segs: Vec<&str> = path.split("::").collect();
+    let mut candidates = Vec::new();
+    for depth in (1..=segs.len()).rev() {
+        let p = segs[..depth].join("/");
+        candidates.push(format!("src/{p}.rs"));
+        candidates.push(format!("src/{p}/mod.rs"));
+    }
+    candidates.iter().find_map(|c| files.get(c).copied())
+}
+
+/// Minified or generated code: no navigation value, expensive to parse.
+fn is_generated(source: &str, size: i64) -> bool {
+    if size > 2_000_000 {
+        return true;
+    }
+    source.lines().take(20).any(|l| l.len() > 2500)
 }
 
 /// Lexical path normalization (resolves `.` and `..` without touching the fs).
