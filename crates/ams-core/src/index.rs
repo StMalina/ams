@@ -1,0 +1,664 @@
+use crate::model::*;
+use crate::parser::{parser_for_ext, SUPPORTED_EXTS};
+use anyhow::{anyhow, bail, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
+
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "__pycache__",
+    "venv",
+    ".venv",
+    "vendor",
+    ".ams",
+];
+
+pub struct Index {
+    conn: Connection,
+    pub root: PathBuf,
+}
+
+#[derive(Debug, Default)]
+pub struct SyncStats {
+    pub parsed: u32,
+    pub removed: u32,
+    pub total: u32,
+}
+
+impl Index {
+    /// Create (or reuse) the index under `root/.ams/`.
+    pub fn create(root: &Path) -> Result<Self> {
+        let root = root
+            .canonicalize()
+            .with_context(|| format!("path not found: {}", root.display()))?;
+        let dir = root.join(".ams");
+        std::fs::create_dir_all(&dir)?;
+        let conn = Connection::open(dir.join("index.db"))?;
+        let idx = Index { conn, root };
+        idx.init_schema()?;
+        Ok(idx)
+    }
+
+    /// Find an existing index by walking up from `start`.
+    pub fn open_existing(start: &Path) -> Result<Self> {
+        let start = start.canonicalize()?;
+        let mut cur = start.as_path();
+        loop {
+            let candidate = cur.join(".ams/index.db");
+            if candidate.exists() {
+                let conn = Connection::open(&candidate)?;
+                let idx = Index {
+                    conn,
+                    root: cur.to_path_buf(),
+                };
+                idx.init_schema()?;
+                return Ok(idx);
+            }
+            match cur.parent() {
+                Some(p) => cur = p,
+                None => bail!(
+                    "no .ams index found from {} upward — run `ams build` in the project root",
+                    start.display()
+                ),
+            }
+        }
+    }
+
+    fn init_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE IF NOT EXISTS files(
+               id INTEGER PRIMARY KEY,
+               path TEXT UNIQUE NOT NULL,
+               lang TEXT NOT NULL,
+               loc INTEGER NOT NULL,
+               hash TEXT NOT NULL,
+               mtime INTEGER NOT NULL,
+               size INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS symbols(
+               id INTEGER PRIMARY KEY,
+               file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+               parent_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+               name TEXT NOT NULL,
+               kind TEXT NOT NULL,
+               signature TEXT NOT NULL,
+               start_line INTEGER NOT NULL,
+               end_line INTEGER NOT NULL,
+               exported INTEGER NOT NULL,
+               body_hash TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
+             CREATE INDEX IF NOT EXISTS symbols_file ON symbols(file_id);
+             CREATE TABLE IF NOT EXISTS imports(
+               file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+               target TEXT NOT NULL,
+               resolved_file_id INTEGER
+             );
+             CREATE INDEX IF NOT EXISTS imports_file ON imports(file_id);
+             CREATE INDEX IF NOT EXISTS imports_resolved ON imports(resolved_file_id);
+             CREATE TABLE IF NOT EXISTS refs(
+               file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+               name TEXT NOT NULL,
+               line INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS refs_name ON refs(name);
+             CREATE TABLE IF NOT EXISTS annotations(
+               key TEXT PRIMARY KEY,
+               body_hash TEXT NOT NULL,
+               doc TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS meta(
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );",
+        )?;
+        // Parser output changes between versions; stored signatures from an
+        // older binary would silently diverge. Wipe files (annotations are
+        // hash-anchored and survive) and let sync() reparse everything.
+        let version = env!("CARGO_PKG_VERSION");
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'parser_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if stored.as_deref() != Some(version) {
+            self.conn.execute("DELETE FROM files", [])?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('parser_version', ?1)",
+                params![version],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Bring the index in line with the filesystem. Cheap when nothing changed
+    /// (stat-only walk); reparses only files whose mtime+size or hash differ.
+    pub fn sync(&mut self) -> Result<SyncStats> {
+        let mut stats = SyncStats::default();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        let known: HashMap<String, (i64, i64, String)> = self
+            .conn
+            .prepare("SELECT path, mtime, size, hash FROM files")?
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let walker = ignore::WalkBuilder::new(&self.root)
+            .filter_entry(|e| {
+                e.file_name()
+                    .to_str()
+                    .map_or(true, |n| !SKIP_DIRS.contains(&n))
+            })
+            .build();
+
+        let tx = self.conn.transaction()?;
+        for entry in walker {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.file_type().map_or(false, |t| t.is_file()) {
+                continue;
+            }
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            if !SUPPORTED_EXTS.contains(&ext) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&self.root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            seen.insert(rel.clone());
+            stats.total += 1;
+
+            let meta = entry.metadata()?;
+            let mtime = meta
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let size = meta.len() as i64;
+
+            if let Some((db_mtime, db_size, _)) = known.get(&rel) {
+                if *db_mtime == mtime && *db_size == size {
+                    continue; // fast path
+                }
+            }
+
+            let source = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue, // non-UTF8 or unreadable
+            };
+            let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+            if let Some((_, _, db_hash)) = known.get(&rel) {
+                if *db_hash == hash {
+                    tx.execute(
+                        "UPDATE files SET mtime = ?1, size = ?2 WHERE path = ?3",
+                        params![mtime, size, rel],
+                    )?;
+                    continue;
+                }
+            }
+
+            let parser = parser_for_ext(ext).unwrap();
+            let parsed = parser
+                .parse(&source)
+                .with_context(|| format!("parse failed: {rel}"))?;
+            upsert_file(&tx, &rel, parser.lang_id(), &parsed, &hash, mtime, size)?;
+            stats.parsed += 1;
+        }
+
+        for path in known.keys() {
+            if !seen.contains(path) {
+                tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+                stats.removed += 1;
+            }
+        }
+
+        if stats.parsed > 0 || stats.removed > 0 {
+            resolve_imports(&tx)?;
+        }
+        tx.commit()?;
+        Ok(stats)
+    }
+
+    /// Convert a user-supplied path (relative to cwd or absolute) into the
+    /// index-relative form.
+    pub fn rel_path(&self, user_path: &str) -> Result<String> {
+        let p = PathBuf::from(user_path);
+        let abs = if p.is_absolute() {
+            p
+        } else {
+            std::env::current_dir()?.join(p)
+        };
+        let abs = normalize(&abs);
+        Ok(abs
+            .strip_prefix(&self.root)
+            .map_err(|_| anyhow!("{} is outside the indexed root {}", user_path, self.root.display()))?
+            .to_string_lossy()
+            .replace('\\', "/"))
+    }
+
+    fn file_id(&self, rel: &str) -> Result<i64> {
+        self.conn
+            .query_row("SELECT id FROM files WHERE path = ?1", params![rel], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| anyhow!("not indexed: {rel} (unsupported language or excluded dir?)"))
+    }
+
+    pub fn describe(&self, rel: &str) -> Result<FileDescription> {
+        let (file_id, lang, loc): (i64, String, u32) = self
+            .conn
+            .query_row(
+                "SELECT id, lang, loc FROM files WHERE path = ?1",
+                params![rel],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("not indexed: {rel}"))?;
+
+        let annotations: HashMap<String, (String, String)> = self
+            .conn
+            .prepare("SELECT key, body_hash, doc FROM annotations WHERE key LIKE ?1")?
+            .query_map(params![format!("{rel}:%")], |r| {
+                Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let symbols = self.load_symbols(file_id, None, rel, "", &annotations)?;
+
+        let imports: Vec<String> = self
+            .conn
+            .prepare("SELECT target FROM imports WHERE file_id = ?1")?
+            .query_map(params![file_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        Ok(FileDescription {
+            path: rel.to_string(),
+            lang,
+            loc,
+            symbols,
+            imports,
+            used_by: self.used_by(file_id)?,
+        })
+    }
+
+    fn load_symbols(
+        &self,
+        file_id: i64,
+        parent_id: Option<i64>,
+        rel: &str,
+        prefix: &str,
+        annotations: &HashMap<String, (String, String)>,
+    ) -> Result<Vec<SymbolInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, kind, signature, start_line, end_line, exported, body_hash
+             FROM symbols WHERE file_id = ?1 AND parent_id IS ?2 ORDER BY start_line",
+        )?;
+        let rows: Vec<(i64, String, String, String, u32, u32, bool, String)> = stmt
+            .query_map(params![file_id, parent_id], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, name, kind, sig, start, end, exported, body_hash) in rows {
+            let symbol_path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}.{name}")
+            };
+            let key = format!("{rel}:{symbol_path}");
+            let (doc, doc_stale) = match annotations.get(&key) {
+                Some((anno_hash, doc)) => (Some(doc.clone()), *anno_hash != body_hash),
+                None => (None, false),
+            };
+            out.push(SymbolInfo {
+                children: self.load_symbols(file_id, Some(id), rel, &symbol_path, annotations)?,
+                name,
+                kind: SymbolKind::from_str(&kind).unwrap_or(SymbolKind::Function),
+                signature: sig,
+                start_line: start,
+                end_line: end,
+                exported,
+                doc,
+                doc_stale,
+            });
+        }
+        Ok(out)
+    }
+
+    fn used_by(&self, file_id: i64) -> Result<Vec<String>> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT DISTINCT f.path FROM imports i JOIN files f ON f.id = i.file_id
+                 WHERE i.resolved_file_id = ?1 ORDER BY f.path",
+            )?
+            .query_map(params![file_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn find(
+        &self,
+        pattern: &str,
+        kind: Option<SymbolKind>,
+        exported_only: bool,
+    ) -> Result<Vec<FindHit>> {
+        let mut sql = String::from(
+            "SELECT f.path, s.name, p.name, s.kind, s.signature, s.start_line, s.end_line, s.exported
+             FROM symbols s
+             JOIN files f ON f.id = s.file_id
+             LEFT JOIN symbols p ON p.id = s.parent_id
+             WHERE s.name LIKE ?1",
+        );
+        if let Some(k) = kind {
+            sql.push_str(&format!(" AND s.kind = '{}'", k.as_str()));
+        }
+        if exported_only {
+            sql.push_str(" AND s.exported = 1");
+        }
+        sql.push_str(" ORDER BY s.exported DESC, f.path, s.start_line LIMIT 200");
+
+        Ok(self
+            .conn
+            .prepare(&sql)?
+            .query_map(params![format!("%{pattern}%")], |r| {
+                let name: String = r.get(1)?;
+                let parent: Option<String> = r.get(2)?;
+                let kind_s: String = r.get(3)?;
+                Ok(FindHit {
+                    path: r.get(0)?,
+                    symbol_path: match parent {
+                        Some(p) => format!("{p}.{name}"),
+                        None => name,
+                    },
+                    kind: SymbolKind::from_str(&kind_s).unwrap_or(SymbolKind::Function),
+                    signature: r.get(4)?,
+                    start_line: r.get(5)?,
+                    end_line: r.get(6)?,
+                    exported: r.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn refs(&self, name: &str) -> Result<Vec<RefHit>> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT f.path, r.line FROM refs r JOIN files f ON f.id = r.file_id
+                 WHERE r.name = ?1 ORDER BY f.path, r.line LIMIT 500",
+            )?
+            .query_map(params![name], |r| {
+                Ok(RefHit {
+                    path: r.get(0)?,
+                    line: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn tree(&self, dir_prefix: Option<&str>) -> Result<Vec<TreeEntry>> {
+        let like = match dir_prefix {
+            Some(d) if !d.is_empty() => format!("{}/%", d.trim_end_matches('/')),
+            _ => "%".to_string(),
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, f.path, f.lang, f.loc,
+               (SELECT COUNT(*) FROM symbols s
+                  WHERE s.file_id = f.id AND s.parent_id IS NULL AND s.exported = 1),
+               (SELECT COUNT(DISTINCT i.file_id) FROM imports i WHERE i.resolved_file_id = f.id)
+             FROM files f WHERE f.path LIKE ?1 ORDER BY f.path",
+        )?;
+        let rows: Vec<(i64, String, String, u32, u32, u32)> = stmt
+            .query_map(params![like], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, path, lang, loc, api, used_by) in rows {
+            let deps: Vec<String> = self
+                .conn
+                .prepare(
+                    "SELECT DISTINCT target FROM imports
+                     WHERE file_id = ?1 AND resolved_file_id IS NULL AND target NOT LIKE '.%'
+                     LIMIT 5",
+                )?
+                .query_map(params![id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            out.push(TreeEntry {
+                path,
+                lang,
+                loc,
+                api_count: api,
+                used_by_count: used_by,
+                deps,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn related(&self, rel: &str) -> Result<RelatedInfo> {
+        let file_id = self.file_id(rel)?;
+        let mut internal = Vec::new();
+        let mut external = Vec::new();
+        let rows: Vec<(String, Option<String>)> = self
+            .conn
+            .prepare(
+                "SELECT i.target, f.path FROM imports i
+                 LEFT JOIN files f ON f.id = i.resolved_file_id
+                 WHERE i.file_id = ?1",
+            )?
+            .query_map(params![file_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (target, resolved) in rows {
+            match resolved {
+                Some(p) => internal.push(p),
+                None => external.push(target),
+            }
+        }
+        internal.sort();
+        internal.dedup();
+        external.sort();
+        external.dedup();
+        Ok(RelatedInfo {
+            path: rel.to_string(),
+            internal_deps: internal,
+            external_deps: external,
+            used_by: self.used_by(file_id)?,
+        })
+    }
+
+    /// Attach an LLM-written doc to `rel:symbol_path`. Bound to the current
+    /// body hash — survives reindexing, flagged stale when the body changes.
+    pub fn annotate(&self, rel: &str, symbol_path: &str, doc: &str) -> Result<()> {
+        let file_id = self.file_id(rel)?;
+        let mut parent_id: Option<i64> = None;
+        let mut body_hash = String::new();
+        for part in symbol_path.split('.') {
+            let row: Option<(i64, String)> = self
+                .conn
+                .query_row(
+                    "SELECT id, body_hash FROM symbols
+                     WHERE file_id = ?1 AND parent_id IS ?2 AND name = ?3",
+                    params![file_id, parent_id, part],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let (id, hash) =
+                row.ok_or_else(|| anyhow!("symbol not found: {rel}:{symbol_path}"))?;
+            parent_id = Some(id);
+            body_hash = hash;
+        }
+        self.conn.execute(
+            "INSERT OR REPLACE INTO annotations(key, body_hash, doc) VALUES (?1, ?2, ?3)",
+            params![format!("{rel}:{symbol_path}"), body_hash, doc],
+        )?;
+        Ok(())
+    }
+
+    /// All indexed file paths under an optional dir prefix.
+    pub fn files_under(&self, dir_prefix: Option<&str>) -> Result<Vec<String>> {
+        let like = match dir_prefix {
+            Some(d) if !d.is_empty() => format!("{}/%", d.trim_end_matches('/')),
+            _ => "%".to_string(),
+        };
+        Ok(self
+            .conn
+            .prepare("SELECT path FROM files WHERE path LIKE ?1 ORDER BY path")?
+            .query_map(params![like], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+}
+
+fn upsert_file(
+    tx: &rusqlite::Transaction,
+    rel: &str,
+    lang: &str,
+    parsed: &ParsedFile,
+    hash: &str,
+    mtime: i64,
+    size: i64,
+) -> Result<()> {
+    // Full replace: cascade wipes symbols/imports/refs; annotations live in
+    // their own table keyed by path+symbol and survive.
+    tx.execute("DELETE FROM files WHERE path = ?1", params![rel])?;
+    tx.execute(
+        "INSERT INTO files(path, lang, loc, hash, mtime, size) VALUES (?1,?2,?3,?4,?5,?6)",
+        params![rel, lang, parsed.loc, hash, mtime, size],
+    )?;
+    let file_id = tx.last_insert_rowid();
+
+    for sym in &parsed.symbols {
+        insert_symbol(tx, file_id, None, sym)?;
+    }
+    for target in &parsed.imports {
+        tx.execute(
+            "INSERT INTO imports(file_id, target) VALUES (?1, ?2)",
+            params![file_id, target],
+        )?;
+    }
+    for r in &parsed.refs {
+        tx.execute(
+            "INSERT INTO refs(file_id, name, line) VALUES (?1, ?2, ?3)",
+            params![file_id, r.name, r.line],
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_symbol(
+    tx: &rusqlite::Transaction,
+    file_id: i64,
+    parent_id: Option<i64>,
+    sym: &ParsedSymbol,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO symbols(file_id, parent_id, name, kind, signature, start_line, end_line, exported, body_hash)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            file_id,
+            parent_id,
+            sym.name,
+            sym.kind.as_str(),
+            sym.signature,
+            sym.start_line,
+            sym.end_line,
+            sym.exported,
+            sym.body_hash
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    for ch in &sym.children {
+        insert_symbol(tx, file_id, Some(id), ch)?;
+    }
+    Ok(())
+}
+
+/// Resolve `./relative` import targets to indexed files (JS/TS style).
+fn resolve_imports(tx: &rusqlite::Transaction) -> Result<()> {
+    let files: HashMap<String, i64> = tx
+        .prepare("SELECT path, id FROM files")?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let rows: Vec<(i64, String, String)> = tx
+        .prepare(
+            "SELECT i.rowid, f.path, i.target FROM imports i
+             JOIN files f ON f.id = i.file_id WHERE i.target LIKE '.%'",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    for (rowid, from, target) in rows {
+        let resolved = resolve_relative(&files, &from, &target);
+        tx.execute(
+            "UPDATE imports SET resolved_file_id = ?1 WHERE rowid = ?2",
+            params![resolved, rowid],
+        )?;
+    }
+    Ok(())
+}
+
+fn resolve_relative(files: &HashMap<String, i64>, from: &str, target: &str) -> Option<i64> {
+    let base = Path::new(from).parent().unwrap_or(Path::new(""));
+    let joined = normalize(&base.join(target));
+    let joined = joined.to_string_lossy().replace('\\', "/");
+    let mut candidates = vec![joined.clone()];
+    for ext in SUPPORTED_EXTS {
+        candidates.push(format!("{joined}.{ext}"));
+        candidates.push(format!("{joined}/index.{ext}"));
+    }
+    candidates.iter().find_map(|c| files.get(c).copied())
+}
+
+/// Lexical path normalization (resolves `.` and `..` without touching the fs).
+fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}

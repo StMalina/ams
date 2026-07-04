@@ -1,0 +1,15 @@
+[package]
+name = "ams-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ams"
+path = "src/main.rs"
+
+[dependencies]
+ams-core = { path = "../ams-core" }
+anyhow.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+serde_json.workspace = true
