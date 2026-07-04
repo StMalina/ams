@@ -5,68 +5,48 @@ Paste this section into your project's AGENTS.md.
 
 ## Code navigation: use `ams`, not Read/Grep, for structure
 
-This project can be indexed by `ams` (AI Module Signatures) — a CLI that
-turns the codebase into compact symbol signatures with exact line spans, so
-you don't have to read whole files to find your way around.
+This project is indexed by `ams` (AI Module Signatures): compact symbol
+signatures with exact line spans instead of full file reads. One `describe`
+costs 10–40× fewer tokens than reading the file. The index self-heals on
+every query — never stale, no rebuild step.
 
-Check once per session:
+Setup once per session: `which ams` (install:
+`cargo install --path crates/ams-cli` from the ams repo); if the project has
+no `.ams/` yet, run `ams build` at the root.
 
-```bash
-which ams || cargo install --path crates/ams-cli   # install from the ams repo
-ls .ams/index.db 2>/dev/null || ams build            # build the index if missing
-```
+### The 3 commands that cover 90% of navigation
 
-Every `ams` command self-heals (reparses changed files on each call), so the
-index is never stale. Workflow:
-
-1. **Unfamiliar file → `ams describe <file>`**, not `Read`:
+1. **Orient in a directory** — `ams tree [dir]` (instead of Glob + Reads):
    ```
-   $ ams describe src/auth.ts
-   src/auth.ts [25 loc, ts]
-     function validateToken(token: string): User | null  @4-8 exported
-     class AuthService  @12-21 exported
-       async login(creds: Credentials): Promise<Session>  @13-16
-         doc: создаёт сессию после проверки токена
-     imports: jwt, ./cache
+   src/auth.ts   ts   820 loc  api:8   used-by:12   jwt,redis
    ```
+   High `api` + high `used-by` = hub file, start there.
 
-2. **Where is symbol X defined? → `ams find X`**, not `Grep`:
+2. **See inside a file** — `ams describe <file>` (instead of Read):
    ```
-   $ ams find validateToken
-   src/auth.ts:4-8  [fn] validateToken exported
-     function validateToken(token: string): User | null
-   ```
-   Filters: `--kind fn|method|class|struct|enum|trait|interface|const|type|mod`, `--exported`.
-
-3. **Who calls X? → `ams refs X`**:
-   ```
-   $ ams refs validateToken
-   src/auth.ts: 4, 55, 102
+   src/auth.ts [820 loc, ts, used-by:12]
+     function validateToken(token: string): User | null  @42-78 exported
+     class AuthService  @97-410 exported
    ```
 
-4. **Directory overview → `ams tree <dir>`** instead of Glob + many Reads:
-   ```
-   $ ams tree src/
-   src/ [14 files]
-     auth.ts      820 loc  api:8   used-by:12  jwt,redis
-   ```
+3. **Read only the body you need** — `@103-160` → read the file with
+   offset=103, limit=58. Never read a whole file when you have its spans.
 
-5. **Deps/reverse-deps of a file → `ams related <file>`**.
+### Before changing any exported API
 
-6. **Reading an actual implementation → `Read` with the span** you got from
-   `describe`/`find` (e.g. `@13-16` → `Read` with offset=13, limit=4). Don't
-   read the whole file when you only need one function's body.
+- `ams related <file>` — deps + reverse deps (`used-by`): what breaks.
+- `ams refs <name>` — usage sites, `calls 12, 45 | value 88` (`value` =
+  passed as handler/callback, e.g. router registrations). Dynamic dispatch
+  and string-based lookups are not indexed — fall back to grep if in doubt.
+- `ams find <name>` — where a symbol is defined (substring, exact spans).
 
-7. **Learned something non-obvious about a symbol → record it:**
-   ```bash
-   ams annotate src/auth.ts:AuthService.login "creates a session only after 2FA check passes"
-   ```
-   The note is tied to the symbol body's hash; it survives reindexing and
-   shows up in `describe` as `doc: ...`, marked `[stale]` if the body later changes.
+### Rarely needed
 
-**`ams` does not replace text/regex search.** Searching for a string, log
-line, or config value is still a job for `rg`/`grep` — `ams` only indexes
-code structure (symbols, signatures, imports, identifier references).
+`ams annotate <file>:<Symbol.path> "note"` — persist a non-obvious insight
+(why, not what); survives reindexing, flagged `[stale]` when the body
+changes. `--exported`, `--kind`, `--json` flags. `ams build --force` after a
+binary upgrade.
 
-Supported languages: TypeScript/TSX, JavaScript/JSX, Rust, Python, Go.
-Global flag `--json` gives machine-readable output for any command.
+**Not a grep replacement:** strings, log lines, config values → still
+`rg`/`grep`. Supported languages: TypeScript/TSX, JavaScript/JSX
+(ESM+CommonJS), Rust, Python, Go, PHP.

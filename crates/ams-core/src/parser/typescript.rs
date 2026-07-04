@@ -1,5 +1,5 @@
 use super::{body_hash, count_loc, line_span, node_text, signature, unquote, LangParser};
-use crate::model::{ParsedFile, ParsedSymbol, RefOccurrence, SymbolKind};
+use crate::model::{ParsedFile, ParsedSymbol, RefKind, RefOccurrence, SymbolKind};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use tree_sitter::Node;
@@ -49,6 +49,7 @@ impl LangParser for TypeScriptParser {
         }
 
         collect_refs(root, source, &mut out.refs);
+        super::collect_value_refs(root, source, &mut out.refs);
         Ok(out)
     }
 }
@@ -313,6 +314,7 @@ fn collect_refs(root: Node, src: &str, refs: &mut Vec<RefOccurrence>) {
                         refs.push(RefOccurrence {
                             name: node_text(src, n).to_string(),
                             line: n.start_position().row as u32 + 1,
+                            kind: RefKind::Call,
                         });
                     }
                 }
@@ -323,6 +325,7 @@ fn collect_refs(root: Node, src: &str, refs: &mut Vec<RefOccurrence>) {
                         refs.push(RefOccurrence {
                             name: node_text(src, c).to_string(),
                             line: c.start_position().row as u32 + 1,
+                            kind: RefKind::Call,
                         });
                     }
                 }

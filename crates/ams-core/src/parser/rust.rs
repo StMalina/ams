@@ -1,5 +1,5 @@
 use super::{body_hash, collapse, count_loc, line_span, node_text, signature, LangParser};
-use crate::model::{ParsedFile, ParsedSymbol, RefOccurrence, SymbolKind};
+use crate::model::{ParsedFile, ParsedSymbol, RefKind, RefOccurrence, SymbolKind};
 use anyhow::{Context, Result};
 use tree_sitter::Node;
 
@@ -30,6 +30,7 @@ impl LangParser for RustParser {
         }
 
         collect_refs(root, source, &mut out.refs);
+        super::collect_value_refs(root, source, &mut out.refs);
         Ok(out)
     }
 }
@@ -177,6 +178,7 @@ fn collect_refs(root: Node, src: &str, refs: &mut Vec<RefOccurrence>) {
                         refs.push(RefOccurrence {
                             name,
                             line: n.start_position().row as u32 + 1,
+                            kind: RefKind::Call,
                         });
                     }
                 }
@@ -192,6 +194,7 @@ fn collect_refs(root: Node, src: &str, refs: &mut Vec<RefOccurrence>) {
                         refs.push(RefOccurrence {
                             name: node_text(src, n).to_string(),
                             line: n.start_position().row as u32 + 1,
+                            kind: RefKind::Call,
                         });
                     }
                 }

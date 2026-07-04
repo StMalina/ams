@@ -1,8 +1,10 @@
-use crate::model::ParsedFile;
+use crate::model::{ParsedFile, RefKind, RefOccurrence};
 use anyhow::Result;
+use std::collections::HashMap;
 use tree_sitter::Node;
 
 pub mod go;
+pub mod php;
 pub mod python;
 pub mod rust;
 pub mod typescript;
@@ -13,7 +15,7 @@ pub trait LangParser: Send + Sync {
 }
 
 pub const SUPPORTED_EXTS: &[&str] = &[
-    "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "go",
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "go", "php",
 ];
 
 pub fn parser_for_ext(ext: &str) -> Option<&'static dyn LangParser> {
@@ -22,12 +24,14 @@ pub fn parser_for_ext(ext: &str) -> Option<&'static dyn LangParser> {
     static RS: rust::RustParser = rust::RustParser;
     static PY: python::PythonParser = python::PythonParser;
     static GO: go::GoParser = go::GoParser;
+    static PHP: php::PhpParser = php::PhpParser;
     Some(match ext {
         "ts" => &TS,
         "tsx" | "js" | "jsx" | "mjs" | "cjs" => &TSX,
         "rs" => &RS,
         "py" => &PY,
         "go" => &GO,
+        "php" => &PHP,
         _ => return None,
     })
 }
@@ -91,4 +95,66 @@ pub(crate) fn count_loc(source: &str) -> u32 {
 /// Strip surrounding quotes from a string-literal node text.
 pub(crate) fn unquote(s: &str) -> String {
     s.trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string()
+}
+
+/// Identifiers read as values (`route(handler)`, `map(parse)`) — catches the
+/// references that call-position tracking misses, e.g. router registrations.
+/// Language-agnostic heuristic over field names / parent kinds; capped at 5
+/// occurrences per name per file to bound noise from locals.
+pub(crate) fn collect_value_refs(root: Node, src: &str, refs: &mut Vec<RefOccurrence>) {
+    // Fields where the identifier is a definition/target, not a use.
+    const DENY_FIELD: &[&str] = &[
+        "name", "property", "key", "alias", "label", "field", "attribute",
+        "pattern", "left", "function", "constructor", "parameter", "index",
+    ];
+    // Parents where identifiers are imports, parameters, or declarations.
+    const DENY_PARENT: &[&str] = &[
+        "import_specifier", "import_clause", "namespace_import", "import_statement",
+        "import_from_statement", "dotted_name", "aliased_import",
+        "use_declaration", "scoped_use_list", "use_as_clause", "use_list",
+        "use_wildcard", "import_spec", "import_declaration",
+        "formal_parameters", "required_parameter", "optional_parameter",
+        "parameters", "lambda_parameters", "default_parameter", "typed_parameter",
+        "typed_default_parameter", "parameter_list", "parameter_declaration",
+        "variadic_parameter_declaration", "self_parameter", "parameter",
+    ];
+
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut cursor = root.walk();
+    'outer: loop {
+        let node = cursor.node();
+        if node.kind() == "identifier" {
+            let denied = cursor
+                .field_name()
+                .map_or(false, |f| DENY_FIELD.contains(&f))
+                || node
+                    .parent()
+                    .map_or(true, |p| DENY_PARENT.contains(&p.kind()));
+            if !denied {
+                let name = node_text(src, node);
+                if name.len() >= 3 {
+                    let c = counts.entry(name.to_string()).or_insert(0);
+                    if *c < 5 {
+                        *c += 1;
+                        refs.push(RefOccurrence {
+                            name: name.to_string(),
+                            line: node.start_position().row as u32 + 1,
+                            kind: RefKind::Value,
+                        });
+                    }
+                }
+            }
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                continue 'outer;
+            }
+            if !cursor.goto_parent() {
+                break 'outer;
+            }
+        }
+    }
 }

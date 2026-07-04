@@ -15,7 +15,7 @@ fi
 
 if find "$PWD" -maxdepth 4 \
     \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \
-       -o -name '*.rs' -o -name '*.py' -o -name '*.go' \) \
+       -o -name '*.rs' -o -name '*.py' -o -name '*.go' -o -name '*.php' \) \
     -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/target/*' \
     -print -quit 2>/dev/null | grep -q .; then
     echo "ams is installed but this project has no .ams/index.db yet — run 'ams build' to enable fast code navigation."

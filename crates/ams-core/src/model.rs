@@ -64,11 +64,30 @@ pub struct ParsedSymbol {
     pub children: Vec<ParsedSymbol>,
 }
 
-/// Identifier observed in call/constructor position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefKind {
+    /// Direct call or constructor position: `foo()`, `new Foo()`.
+    Call,
+    /// Identifier passed/read as a value: `route(foo)`, `map(foo)`.
+    Value,
+}
+
+impl RefKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RefKind::Call => "call",
+            RefKind::Value => "value",
+        }
+    }
+}
+
+/// Identifier observed in call position or as a value reference.
 #[derive(Debug, Clone, Serialize)]
 pub struct RefOccurrence {
     pub name: String,
     pub line: u32,
+    pub kind: RefKind,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -119,6 +138,7 @@ pub struct FindHit {
 pub struct RefHit {
     pub path: String,
     pub line: u32,
+    pub kind: RefKind,
 }
 
 #[derive(Debug, Serialize)]

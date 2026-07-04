@@ -104,7 +104,8 @@ impl Index {
              CREATE TABLE IF NOT EXISTS refs(
                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
                name TEXT NOT NULL,
-               line INTEGER NOT NULL
+               line INTEGER NOT NULL,
+               kind TEXT NOT NULL DEFAULT 'call'
              );
              CREATE INDEX IF NOT EXISTS refs_name ON refs(name);
              CREATE TABLE IF NOT EXISTS annotations(
@@ -117,6 +118,10 @@ impl Index {
                value TEXT NOT NULL
              );",
         )?;
+        // Migration for pre-0.2 databases (refs had no kind column).
+        let _ = self
+            .conn
+            .execute("ALTER TABLE refs ADD COLUMN kind TEXT NOT NULL DEFAULT 'call'", []);
         // Parser output changes between versions; stored signatures from an
         // older binary would silently diverge. Wipe files (annotations are
         // hash-anchored and survive) and let sync() reparse everything.
@@ -421,13 +426,19 @@ impl Index {
         Ok(self
             .conn
             .prepare(
-                "SELECT f.path, r.line FROM refs r JOIN files f ON f.id = r.file_id
-                 WHERE r.name = ?1 ORDER BY f.path, r.line LIMIT 500",
+                "SELECT f.path, r.line, r.kind FROM refs r JOIN files f ON f.id = r.file_id
+                 WHERE r.name = ?1 ORDER BY f.path, r.kind, r.line LIMIT 500",
             )?
             .query_map(params![name], |r| {
+                let kind: String = r.get(2)?;
                 Ok(RefHit {
                     path: r.get(0)?,
                     line: r.get(1)?,
+                    kind: if kind == "value" {
+                        RefKind::Value
+                    } else {
+                        RefKind::Call
+                    },
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
@@ -583,8 +594,8 @@ fn upsert_file(
     }
     for r in &parsed.refs {
         tx.execute(
-            "INSERT INTO refs(file_id, name, line) VALUES (?1, ?2, ?3)",
-            params![file_id, r.name, r.line],
+            "INSERT INTO refs(file_id, name, line, kind) VALUES (?1, ?2, ?3, ?4)",
+            params![file_id, r.name, r.line, r.kind.as_str()],
         )?;
     }
     Ok(())
@@ -639,6 +650,7 @@ fn resolve_imports(tx: &rusqlite::Transaction) -> Result<()> {
         let resolved = match lang.as_str() {
             "py" => resolve_python(&files, &from, &target),
             "rs" => resolve_rust(&files, &target),
+            "php" => resolve_php(&files, &from, &target),
             _ if target.starts_with('.') => resolve_relative(&files, &from, &target),
             _ => None,
         };
@@ -694,6 +706,17 @@ fn resolve_python(files: &HashMap<String, i64>, from: &str, target: &str) -> Opt
         ["", "src/", "lib/"]
             .iter()
             .find_map(|prefix| lookup(&format!("{prefix}{as_path}")))
+    }
+}
+
+/// `require '../lib/foo.php'` / `require './foo.php'` resolve as relative
+/// file paths. `use Foo\Bar;` namespace imports need PSR-4 mapping (composer
+/// autoload config) that isn't parsed yet, so they stay unresolved.
+fn resolve_php(files: &HashMap<String, i64>, from: &str, target: &str) -> Option<i64> {
+    if target.contains('/') || target.ends_with(".php") {
+        resolve_relative(files, from, target)
+    } else {
+        None
     }
 }
 

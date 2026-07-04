@@ -1,5 +1,6 @@
 use ams_core::model::SymbolKind;
 use ams_core::parser::go::GoParser;
+use ams_core::parser::php::PhpParser;
 use ams_core::parser::python::PythonParser;
 use ams_core::parser::rust::RustParser;
 use ams_core::parser::LangParser;
@@ -350,4 +351,163 @@ fn commonjs_module_exports_marks_symbols_exported() {
     let direct = find(&parsed.symbols, "directFn");
     assert!(direct.exported);
     assert_eq!(direct.kind, SymbolKind::Function);
+}
+
+#[test]
+fn value_refs_catch_handler_registration() {
+    use ams_core::model::RefKind;
+    let js = "const { listUsers } = require('./users')\nrouter.get('/users', listUsers)\n";
+    let parsed = ams_core::parser::parser_for_ext("js").unwrap().parse(js).unwrap();
+    assert!(parsed
+        .refs
+        .iter()
+        .any(|r| r.name == "listUsers" && r.kind == RefKind::Value && r.line == 2));
+
+    let rs = "use axum::routing::delete;\npub async fn revoke() {}\nfn router() { route(\"/s\", delete(revoke)); }\n";
+    let parsed = ams_core::parser::parser_for_ext("rs").unwrap().parse(rs).unwrap();
+    assert!(parsed
+        .refs
+        .iter()
+        .any(|r| r.name == "revoke" && r.kind == RefKind::Value && r.line == 3));
+}
+
+// ---------------------------------------------------------------------
+// PHP
+// ---------------------------------------------------------------------
+
+const PHP_SRC: &str = r#"<?php
+
+namespace App\Services;
+
+use App\Contracts\Renderable;
+use App\Models\{User, Order as OrderModel};
+
+require_once 'bootstrap.php';
+require '../config.php';
+
+const VERSION = '1.0';
+
+function make_widget($x) {
+    return helper($x);
+}
+
+class Widget implements Renderable {
+    const MAX = 5;
+    private $x;
+
+    public function __construct($x) {
+        $this->x = $x;
+        make_widget($x);
+        parent::__construct();
+    }
+
+    public function render() {
+        return $this->x;
+    }
+
+    private function secret() {
+        return 1;
+    }
+
+    protected function guarded() {
+        return 2;
+    }
+}
+
+$w = new Widget(1);
+$w->render();
+Widget::create();
+some_call($w, DEFAULT_MODE);
+"#;
+
+#[test]
+fn php_parses_top_level_function_and_const() {
+    let out = PhpParser.parse(PHP_SRC).unwrap();
+
+    let f = find(&out.symbols, "make_widget");
+    assert_eq!(f.kind, SymbolKind::Function);
+    assert!(f.exported);
+    assert_eq!(f.start_line, 13);
+    assert_eq!(f.end_line, 15);
+
+    let version = find(&out.symbols, "VERSION");
+    assert_eq!(version.kind, SymbolKind::Const);
+    assert!(version.exported);
+    assert_eq!(version.start_line, 11);
+    assert_eq!(version.end_line, 11);
+}
+
+#[test]
+fn php_parses_class_and_methods() {
+    let out = PhpParser.parse(PHP_SRC).unwrap();
+    let widget = find(&out.symbols, "Widget");
+    assert_eq!(widget.kind, SymbolKind::Class);
+    assert!(widget.exported);
+    assert_eq!(widget.start_line, 17);
+    assert_eq!(widget.end_line, 38);
+
+    // class-level const/property are skipped, not surfaced as symbols.
+    assert!(!widget.children.iter().any(|c| c.name == "MAX" || c.name == "x"));
+
+    let ctor = find(&widget.children, "__construct");
+    assert_eq!(ctor.kind, SymbolKind::Method);
+    assert!(ctor.exported);
+    assert_eq!(ctor.start_line, 21);
+    assert_eq!(ctor.end_line, 25);
+
+    let render = find(&widget.children, "render");
+    assert!(render.exported);
+
+    let secret = find(&widget.children, "secret");
+    assert!(!secret.exported);
+
+    let guarded = find(&widget.children, "guarded");
+    assert!(!guarded.exported);
+}
+
+#[test]
+fn php_parses_imports() {
+    let out = PhpParser.parse(PHP_SRC).unwrap();
+    assert!(out.imports.iter().any(|i| i == "App\\Contracts\\Renderable"), "imports: {:?}", out.imports);
+    assert!(out.imports.iter().any(|i| i == "App\\Models\\User"), "imports: {:?}", out.imports);
+    assert!(out.imports.iter().any(|i| i == "App\\Models\\Order"), "imports: {:?}", out.imports);
+    assert!(out.imports.iter().any(|i| i == "bootstrap.php"), "imports: {:?}", out.imports);
+    assert!(out.imports.iter().any(|i| i == "../config.php"), "imports: {:?}", out.imports);
+}
+
+#[test]
+fn php_parses_call_refs() {
+    use ams_core::model::RefKind;
+    let out = PhpParser.parse(PHP_SRC).unwrap();
+    let calls: Vec<(&str, u32)> = out
+        .refs
+        .iter()
+        .filter(|r| r.kind == RefKind::Call)
+        .map(|r| (r.name.as_str(), r.line))
+        .collect();
+    assert!(calls.contains(&("helper", 14)), "calls: {:?}", calls);
+    assert!(calls.contains(&("make_widget", 23)), "calls: {:?}", calls);
+    assert!(calls.contains(&("__construct", 24)), "calls: {:?}", calls);
+    assert!(calls.contains(&("Widget", 40)), "calls: {:?}", calls);
+    assert!(calls.contains(&("render", 41)), "calls: {:?}", calls);
+    assert!(calls.contains(&("create", 42)), "calls: {:?}", calls);
+    assert!(calls.contains(&("some_call", 43)), "calls: {:?}", calls);
+}
+
+#[test]
+fn php_parses_value_refs() {
+    use ams_core::model::RefKind;
+    let out = PhpParser.parse(PHP_SRC).unwrap();
+    assert!(out
+        .refs
+        .iter()
+        .any(|r| r.name == "DEFAULT_MODE" && r.kind == RefKind::Value && r.line == 43));
+}
+
+#[test]
+fn php_functions_inside_control_flow_blocks() {
+    let php = "<?php\nif (!function_exists('legacy_helper')) {\n    function legacy_helper($x) {\n        return $x;\n    }\n}\n";
+    let parsed = ams_core::parser::parser_for_ext("php").unwrap().parse(php).unwrap();
+    let f = parsed.symbols.iter().find(|s| s.name == "legacy_helper").expect("nested fn");
+    assert_eq!((f.start_line, f.end_line), (3, 5));
 }

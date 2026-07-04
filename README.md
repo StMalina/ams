@@ -21,6 +21,38 @@ in SQLite (`.ams/index.db`), and answers queries with compact text: every
 symbol carries an exact `@start-end` line span, so the agent follows up with
 a targeted `Read(offset, limit)` instead of loading the entire file.
 
+## Measured token savings
+
+Numbers from real repositories (not benchmarks-in-a-vacuum):
+
+| Repository | Files | Index time | Signature vs source |
+|---|---|---|---|
+| Node/Express legacy (330 js) | 330 | 0.57 s | **33×** smaller |
+| Python bot (199 py) | 199 | 0.40 s | **18×** smaller |
+| Mixed Rust + React (147 rs/ts/tsx) | 147 | 0.34 s | **12×** smaller |
+
+A concrete navigation task — "where are sessions revoked?" on the mixed
+repo: the `ams find` + `ams refs` path cost **372 bytes** of output; the
+default path (grep, then read the 40 KB route file) costs ~100× more, and
+a realistic grep-then-windowed-read still costs ~10× more. As a bonus, `ams`
+also returned the frontend counterpart (`revokeSessions` in `client.ts`)
+that a `--include='*.rs'` grep silently missed.
+
+Where the wins actually come from:
+
+1. **`used-by` (reverse dependencies) — information agents normally don't
+   have at all.** Resolving who imports a file across relative paths,
+   index re-exports, and CommonJS/ESM mixes is so expensive with grep that
+   agents usually skip impact analysis entirely. `ams tree` shows it as a
+   column; `ams related` lists the exact files.
+2. **Exact spans kill re-reads.** Grep gives you the start of a function,
+   never the end — so agents read `offset, limit=80` and guess. `@243-370`
+   means exactly one targeted read.
+3. **Savings concentrate in the recon phase.** Orienting in an unfamiliar
+   repo drops from 5–15 full-file reads to one `tree` + a few `describe`
+   calls: 50–80% fewer navigation tokens. During the editing phase savings
+   are smaller — you still read the bodies you change.
+
 ## Install
 
 ```bash
@@ -44,7 +76,7 @@ ams refs validateToken          # who calls it
 
 | Command | Replaces | Output |
 |---|---|---|
-| `ams build [path]` | — | full index (init + reindex) at `<path>/.ams/index.db` |
+| `ams build [path]` | — | full index (init + reindex) at `<path>/.ams/index.db`; `--force` reparses all |
 | `ams describe <file\|dir>...` | `Read` of a whole file | signatures with `@start-end` spans |
 | `ams find <name>` | `Grep` for `fn X\|class X` | definitions: file, span, signature |
 | `ams refs <name>` | `Grep` for a name, with noise | usages: file, line |
@@ -72,10 +104,11 @@ src/auth.ts [25 loc, ts]
 
 ```
 $ ams tree src/
-src/ [14 files]
-  auth.ts      820 loc  api:8   used-by:12  jwt,redis
-  router.ts    340 loc  api:3   used-by:2   express
+src/auth.ts     ts   820 loc  api:8   used-by:12  jwt,redis
+src/router.ts   ts   340 loc  api:3   used-by:2   express
 ```
+
+High `api` + high `used-by` marks the hub files of a project.
 
 ### `ams find`
 
@@ -89,9 +122,14 @@ src/auth.ts:4-8  [fn] validateToken exported
 
 ```
 $ ams refs validateToken
-src/auth.ts: 4, 55, 102
-src/router.ts: 12
+src/auth.ts: calls 55, 102
+src/router.ts: value 12
 ```
+
+`calls` are direct call sites; `value` means the identifier is passed
+around as a value — handler registrations (`route("/x", delete(handler))`),
+callbacks, exports. Dynamic dispatch and string-based lookups are not
+indexed; fall back to text grep for those.
 
 ### `ams related`
 
@@ -132,7 +170,9 @@ platform-specific) — install it separately via `cargo install`.
 
 ## Supported languages
 
-TypeScript, TSX, JavaScript, JSX, Rust, Python, Go.
+TypeScript, TSX, JavaScript, JSX (ESM and CommonJS), Rust, Python, Go, PHP.
+Minified/generated files (>2 MB or 2500+ char lines) are skipped
+automatically.
 
 ## Architecture
 

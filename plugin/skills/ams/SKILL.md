@@ -1,137 +1,68 @@
 ---
 name: ams
-description: Navigate and understand code without reading full files. Use before Read on an unfamiliar file, before Grep for a symbol definition, when asked "what's in this file/directory", "where is X defined", "who calls X", or before exploring a codebase's structure. Triggers on code navigation, symbol search, directory overview, and impact analysis (who uses this).
+description: Navigate code without reading full files. Use before Read on an unfamiliar file, before Grep for a symbol definition, when asked "what's in this file/directory", "where is X defined", "who calls/uses X", or before changing any exported API. Triggers on code navigation, symbol search, directory overview, and impact analysis.
 ---
 
-# ams — AI Module Signatures
+# ams — compact code signatures instead of file reads
 
-`ams` is a Rust CLI that indexes a codebase with tree-sitter into SQLite
-(`.ams/index.db`) and prints compact signatures instead of full source. Every
-symbol carries an exact line span `@start-end`, so you read source only when
-you need the body, and only the lines you need.
+Indexed signatures with exact line spans. One `describe` costs 10–40× fewer
+tokens than reading the file. The index self-heals on every query — never
+stale, no rebuild needed.
 
-Every `ams` command self-heals: it stat-walks the tree and reparses only
-changed files before answering, so the index is never stale by construction.
+Setup once: `which ams` (install: `cargo install --path crates/ams-cli` from
+the AMS repo). No `.ams/` in project → run `ams build` once at the root.
 
-## Setup (check once per session)
+## The 3 commands that cover 90% of navigation
 
-```bash
-which ams
-```
-
-If empty, install from the AMS repo:
-
-```bash
-cargo install --path crates/ams-cli   # run from the ams repo root
-```
-
-If `ams` exists but the current project has no index:
-
-```bash
-ls .ams/index.db 2>/dev/null || ams build
-```
-
-`ams build` walks the project root and creates `.ams/index.db`. Re-running it
-is cheap and safe (incremental).
-
-## Workflow — replace these habits
-
-### (a) Unfamiliar file → `describe`, not `Read`
-
-```
-$ ams describe src/auth.ts
-src/auth.ts [25 loc, ts]
-  function validateToken(token: string): User | null  @4-8 exported
-  class AuthService  @12-21 exported
-    async login(creds: Credentials): Promise<Session>  @13-16
-      doc: создаёт сессию после проверки токена
-  imports: jwt, ./cache
-```
-
-One call replaces reading the whole file. It also works on a directory
-(prints one description per file).
-
-### (b) "Where is X defined?" → `find`, not `Grep`
-
-```
-$ ams find validateToken
-src/auth.ts:4-8  [fn] validateToken exported
-  function validateToken(token: string): User | null
-```
-
-Filter with `--kind fn|method|class|struct|enum|trait|interface|const|type|mod`
-and/or `--exported`. Do not `Grep -r "function validateToken"` — `find` is
-faster and returns the exact span.
-
-### (c) "Who calls X?" → `refs`
-
-```
-$ ams refs validateToken
-src/auth.ts: 4, 55, 102
-src/router.ts: 12
-```
-
-Impact analysis before renaming/changing a signature: check `refs` first.
-
-### (d) Directory overview → `tree`
+**1. Orient in a directory — `ams tree [dir]`** (instead of Glob + Reads)
 
 ```
 $ ams tree src/
-src/auth.ts      820 loc  api:8   used-by:12  jwt,redis
-src/router.ts    340 loc  api:3   used-by:2   express
+src/auth.ts   ts   820 loc  api:8   used-by:12   jwt,redis
+src/util.ts   ts    40 loc  api:2   used-by:31
 ```
 
-One line per file: size, exported-API count, reverse-dependency count,
-external deps. Use this instead of `Glob` + a series of `Read` calls to get
-oriented in a new directory.
+High `api` + high `used-by` = hub file, start there.
 
-### (e) Dependencies / reverse-dependencies → `related`
+**2. See inside a file — `ams describe <file>`** (instead of Read)
 
 ```
-$ ams related src/auth.ts
-src/auth.ts
-  deps internal: ./cache, ./session
-  deps external: jwt
-  used-by: src/router.ts, src/app.ts
+$ ams describe src/auth.ts
+src/auth.ts [820 loc, ts, used-by:12]
+  function validateToken(token: string): User | null  @42-78 exported
+  class AuthService  @97-410 exported
+    async login(creds): Promise<Session>  @103-160
+      doc: creates session only after 2FA passes
+  imports: jwt, redis, ./session
 ```
 
-Use before touching a file's exported API, to see what would break.
+**3. Read only the body you need — `Read` with the span**
 
-### (f) Reading the actual implementation → `Read` with the span
+`@103-160` → `Read(file_path="src/auth.ts", offset=103, limit=58)`.
+Never read a whole file when you already have its spans.
 
-Once `describe`/`find` gives you `@13-16`, read exactly that range instead of
-the whole file:
+## Before changing any exported API
 
-```
-Read(file_path="src/auth.ts", offset=13, limit=4)
-```
+- `ams related <file>` — deps + reverse deps (`used-by`): what breaks if you
+  change this file. This is info you can't cheaply get with Grep.
+- `ams refs <name>` — usage sites: `calls 12, 45 | value 88`. `value` = passed
+  as handler/callback (router registrations etc.). Not indexed: dynamic
+  dispatch, string-based lookups — if `refs` is empty but you suspect usage,
+  fall back to Grep.
+- `ams find <name>` — where a symbol is defined (substring match, exact spans,
+  cross-language).
 
-### (g) Learned something non-obvious → `annotate`
+## Rarely needed, good to know
 
-When you figure out *why* a function does something (not visible from its
-signature), record it so future sessions/agents don't re-derive it:
+- `ams annotate <file>:<Symbol.path> "note"` — persist a non-obvious insight
+  (why, not what). Survives reindexing; flagged `[stale]` if the body changes.
+  Annotate when you spent real effort understanding a function.
+- `--exported` (describe/find) — public surface only; `--kind fn|class|...` on find.
+- `--json` — machine-readable output.
+- `ams build --force` — full reparse (only after an ams binary upgrade acts odd).
 
-```bash
-ams annotate src/auth.ts:AuthService.login "creates a session only after 2FA check passes"
-```
+## Not a Grep replacement
 
-The note is keyed to the symbol body's hash. It survives reindexing and
-shows up in `describe` output as `doc: ...`. If the function body later
-changes, the note is kept but flagged `[stale]` — verify and re-annotate.
-
-## What ams does NOT replace
-
-Text/regex search over file contents (log lines, string literals, comments,
-config values, arbitrary patterns) is still `Grep`/`rg`. `ams` indexes code
-*structure* (symbols, signatures, imports, call-name references) — not
-arbitrary text. Use `Grep` when you're searching for a string, not a symbol.
-
-## Flags
-
-- `--json` (global): machine-readable output instead of compact text.
-- `--kind <fn|method|class|struct|enum|trait|interface|const|type|mod>` on `find`.
-- `--exported` on `describe`/`find`: only exported/public symbols.
-
-## Supported languages
-
-TypeScript/TSX, JavaScript/JSX, Rust, Python, Go.
+Searching for strings, log messages, config values, comments → still Grep.
+ams indexes structure (symbols, spans, imports, references), not text.
+Languages: TypeScript/TSX, JavaScript/JSX (ESM+CommonJS), Rust, Python, Go, PHP.

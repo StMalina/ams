@@ -91,23 +91,41 @@ pub fn find(hits: &[FindHit], pattern: &str) -> String {
 
 pub fn refs(hits: &[RefHit], name: &str) -> String {
     if hits.is_empty() {
-        return format!("no usages of '{name}'\n");
+        return format!(
+            "no indexed usages of '{name}' (calls or value refs); \
+             strings/dynamic dispatch are not indexed — try a text grep\n"
+        );
     }
     let mut out = String::new();
     let mut cur: Option<&str> = None;
-    let mut lines: Vec<String> = Vec::new();
+    let mut calls: Vec<String> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
+    let flush = |out: &mut String, p: &str, calls: &mut Vec<String>, values: &mut Vec<String>| {
+        let mut parts = Vec::new();
+        if !calls.is_empty() {
+            parts.push(format!("calls {}", calls.join(", ")));
+        }
+        if !values.is_empty() {
+            parts.push(format!("value {}", values.join(", ")));
+        }
+        out.push_str(&format!("{p}: {}\n", parts.join(" | ")));
+        calls.clear();
+        values.clear();
+    };
     for h in hits {
         if cur != Some(h.path.as_str()) {
             if let Some(p) = cur {
-                out.push_str(&format!("{p}: {}\n", lines.join(", ")));
-                lines.clear();
+                flush(&mut out, p, &mut calls, &mut values);
             }
             cur = Some(&h.path);
         }
-        lines.push(h.line.to_string());
+        match h.kind {
+            RefKind::Call => calls.push(h.line.to_string()),
+            RefKind::Value => values.push(h.line.to_string()),
+        }
     }
     if let Some(p) = cur {
-        out.push_str(&format!("{p}: {}\n", lines.join(", ")));
+        flush(&mut out, p, &mut calls, &mut values);
     }
     out
 }
