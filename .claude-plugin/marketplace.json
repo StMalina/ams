@@ -1,0 +1,11 @@
+{
+  "name": "ams",
+  "owner": {"name": "StMalina"},
+  "plugins": [
+    {
+      "name": "ams",
+      "source": "./plugin",
+      "description": "AI Module Signatures — compact code index. Read signatures instead of files."
+    }
+  ]
+}

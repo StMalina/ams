@@ -5,8 +5,9 @@ members = ["crates/ams-core", "crates/ams-cli"]
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/StMalina/ams"
+description = "AI Module Signatures — compact code index for AI agents: signatures with exact line spans instead of full file reads"
 
 [workspace.dependencies]
 anyhow = "1"

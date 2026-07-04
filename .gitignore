@@ -1,2 +1,3 @@
 target/
 .ams/
+.claude/settings.local.json

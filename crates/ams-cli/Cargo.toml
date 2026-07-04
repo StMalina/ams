@@ -3,6 +3,8 @@ name = "ams-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description.workspace = true
 
 [[bin]]
 name = "ams"

@@ -9,8 +9,9 @@ Indexed signatures with exact line spans. One `describe` costs 10–40× fewer
 tokens than reading the file. The index self-heals on every query — never
 stale, no rebuild needed.
 
-Setup once: `which ams` (install: `cargo install --path crates/ams-cli` from
-the AMS repo). No `.ams/` in project → run `ams build` once at the root.
+Setup once: `which ams` (install:
+`curl -fsSL https://raw.githubusercontent.com/StMalina/ams/main/install.sh | sh`).
+No `.ams/` in project → run `ams build` once at the root.
 
 ## The 3 commands that cover 90% of navigation
 

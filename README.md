@@ -55,9 +55,18 @@ Where the wins actually come from:
 
 ## Install
 
+Prebuilt binary (Linux x64/arm64, macOS x64/arm64 — static musl on Linux):
+
 ```bash
-git clone <this repo>
-cd AMS
+curl -fsSL https://raw.githubusercontent.com/StMalina/ams/main/install.sh | sh
+```
+
+Windows: download the `.zip` from
+[Releases](https://github.com/StMalina/ams/releases). From source:
+
+```bash
+git clone https://github.com/StMalina/ams
+cd ams
 cargo install --path crates/ams-cli
 ams --version
 ```
@@ -176,7 +185,15 @@ When the annotated symbol's body changes, the note is kept but shown with a
 
 ## Integration
 
-**Claude Code plugin** — `plugin/` contains a manifest
+**Claude Code plugin** — install from this repo (it doubles as a plugin
+marketplace):
+
+```
+/plugin marketplace add StMalina/ams
+/plugin install ams@ams
+```
+
+`plugin/` contains a manifest
 (`plugin/.claude-plugin/plugin.json`), a skill
 (`plugin/skills/ams/SKILL.md`) that teaches the agent the
 describe/find/refs/tree/related/annotate workflow in place of raw
@@ -203,3 +220,8 @@ automatically.
   formatters.
 - `.ams/index.db` — per-project SQLite database created by `ams build`,
   holding files, symbols, imports, identifier-level refs, and annotations.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.

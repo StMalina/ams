@@ -11,8 +11,8 @@ costs 10–40× fewer tokens than reading the file. The index self-heals on
 every query — never stale, no rebuild step.
 
 Setup once per session: `which ams` (install:
-`cargo install --path crates/ams-cli` from the ams repo); if the project has
-no `.ams/` yet, run `ams build` at the root.
+`curl -fsSL https://raw.githubusercontent.com/StMalina/ams/main/install.sh | sh`);
+if the project has no `.ams/` yet, run `ams build` at the root.
 
 ### The 3 commands that cover 90% of navigation
 
