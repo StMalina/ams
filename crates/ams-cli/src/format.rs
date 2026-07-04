@@ -178,6 +178,50 @@ pub fn refs(hits: &[RefHit], name: &str) -> String {
              strings/dynamic dispatch are not indexed — try a text grep\n"
         );
     }
+    let file_count = {
+        let mut paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        paths.dedup();
+        paths.len()
+    };
+    // Common names (get, run, init...) explode into hundreds of lines of
+    // line numbers; collapse to per-file counts and point at --in.
+    if file_count > 20 {
+        let total = if hits.len() >= 500 {
+            "500+".to_string()
+        } else {
+            hits.len().to_string()
+        };
+        let mut out = format!(
+            "{total} usages in {file_count} files — common name; narrow with \
+             `ams refs {name} --in <dir>` or a more specific symbol\n"
+        );
+        let mut cur: Option<&str> = None;
+        let mut n = 0usize;
+        let mut shown = 0usize;
+        let flush = |out: &mut String, p: &str, n: usize, shown: &mut usize| {
+            if *shown < 25 {
+                out.push_str(&format!("{p}: {n} refs\n"));
+            }
+            *shown += 1;
+        };
+        for h in hits {
+            if cur != Some(h.path.as_str()) {
+                if let Some(p) = cur {
+                    flush(&mut out, p, n, &mut shown);
+                }
+                cur = Some(&h.path);
+                n = 0;
+            }
+            n += 1;
+        }
+        if let Some(p) = cur {
+            flush(&mut out, p, n, &mut shown);
+        }
+        if shown > 25 {
+            out.push_str(&format!("… and {} more files\n", shown - 25));
+        }
+        return out;
+    }
     let mut out = String::new();
     let mut cur: Option<&str> = None;
     let mut calls: Vec<String> = Vec::new();
@@ -221,7 +265,17 @@ pub fn related(info: &RelatedInfo) -> String {
         out.push_str(&format!("  deps external: {}\n", info.external_deps.join(", ")));
     }
     if !info.used_by.is_empty() {
-        out.push_str(&format!("  used-by: {}\n", info.used_by.join(", ")));
+        // Hub files can have 100+ reverse deps; cap the list, keep the count.
+        if info.used_by.len() > 30 {
+            out.push_str(&format!(
+                "  used-by ({} files): {}, … and {} more (--json for all)\n",
+                info.used_by.len(),
+                info.used_by[..30].join(", "),
+                info.used_by.len() - 30,
+            ));
+        } else {
+            out.push_str(&format!("  used-by: {}\n", info.used_by.join(", ")));
+        }
     }
     if info.internal_deps.is_empty() && info.external_deps.is_empty() && info.used_by.is_empty() {
         out.push_str("  no known relations\n");

@@ -67,6 +67,9 @@ enum Cmd {
     /// Find usages (call sites) of a symbol name
     Refs {
         name: String,
+        /// Only usages under this directory (narrows common names)
+        #[arg(long = "in", value_name = "DIR")]
+        in_dir: Option<String>,
     },
     /// Dependencies and reverse dependencies of a file
     Related {
@@ -219,8 +222,8 @@ fn run() -> Result<()> {
                 print!("{}", format::find(&hits, &name));
             }
         }
-        Cmd::Refs { name } => {
-            let hits = idx.refs(&name)?;
+        Cmd::Refs { name, in_dir } => {
+            let hits = idx.refs(&name, in_dir.as_deref())?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&hits)?);
             } else {

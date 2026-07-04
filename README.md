@@ -157,8 +157,10 @@ src/router.ts: value 12
 
 `calls` are direct call sites; `value` means the identifier is passed
 around as a value — handler registrations (`route("/x", delete(handler))`),
-callbacks, exports. Dynamic dispatch and string-based lookups are not
-indexed; fall back to text grep for those.
+callbacks, exports. When a name is too common (`get`, `run`: 20+ files) the
+output collapses to per-file counts — narrow it with `--in <dir>`. Dynamic
+dispatch and string-based lookups are not indexed; fall back to text grep
+for those.
 
 ### `ams related`
 

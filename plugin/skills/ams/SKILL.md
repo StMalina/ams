@@ -53,9 +53,10 @@ Never read a whole file when you already have its spans.
 - `ams related <file>` — deps + reverse deps (`used-by`): what breaks if you
   change this file. This is info you can't cheaply get with Grep.
 - `ams refs <name>` — usage sites: `calls 12, 45 | value 88`. `value` = passed
-  as handler/callback (router registrations etc.). Not indexed: dynamic
-  dispatch, string-based lookups — if `refs` is empty but you suspect usage,
-  fall back to Grep.
+  as handler/callback (router registrations etc.). Common names collapse to
+  per-file counts — narrow with `--in <dir>`. Not indexed: dynamic dispatch,
+  string-based lookups — if `refs` is empty but you suspect usage, fall back
+  to Grep.
 - `ams find <name>` — where a symbol is defined (substring match, exact spans,
   cross-language).
 - `ams search <words>` — full-text search over names, signatures, and docs

@@ -476,14 +476,19 @@ impl Index {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn refs(&self, name: &str) -> Result<Vec<RefHit>> {
+    pub fn refs(&self, name: &str, in_dir: Option<&str>) -> Result<Vec<RefHit>> {
+        let like = match in_dir {
+            Some(d) if !d.is_empty() => format!("{}/%", d.trim_end_matches('/')),
+            _ => "%".to_string(),
+        };
         Ok(self
             .conn
             .prepare(
                 "SELECT f.path, r.line, r.kind FROM refs r JOIN files f ON f.id = r.file_id
-                 WHERE r.name = ?1 ORDER BY f.path, r.kind, r.line LIMIT 500",
+                 WHERE r.name = ?1 AND f.path LIKE ?2
+                 ORDER BY f.path, r.kind, r.line LIMIT 500",
             )?
-            .query_map(params![name], |r| {
+            .query_map(params![name, like], |r| {
                 let kind: String = r.get(2)?;
                 Ok(RefHit {
                     path: r.get(0)?,
