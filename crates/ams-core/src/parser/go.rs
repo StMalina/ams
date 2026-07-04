@@ -1,4 +1,4 @@
-use super::{body_hash, count_loc, line_span, node_text, signature, unquote, LangParser};
+use super::{body_hash, preceding_doc, count_loc, line_span, node_text, signature, unquote, LangParser};
 use crate::model::{ParsedFile, ParsedSymbol, RefKind, RefOccurrence, SymbolKind};
 use anyhow::{Context, Result};
 use tree_sitter::Node;
@@ -129,6 +129,7 @@ fn collect_spec_names(spec: Node, src: &str, out: &mut ParsedFile) {
             start_line: start,
             end_line: end,
             body_hash: body_hash(src, spec),
+            doc: None,
             children: vec![],
         });
     }
@@ -146,6 +147,7 @@ fn simple_symbol(node: Node, src: &str, kind: SymbolKind) -> Option<ParsedSymbol
         end_line: end,
         exported: is_exported(node_text(src, name_node)),
         body_hash: body_hash(src, node),
+        doc: preceding_doc(node, src),
         children: vec![],
     })
 }
@@ -177,6 +179,7 @@ fn build_type_spec(spec: Node, src: &str) -> Option<ParsedSymbol> {
         start_line: start,
         end_line: end,
         body_hash: body_hash(src, spec),
+        doc: None,
         children: vec![],
     })
 }

@@ -79,8 +79,9 @@ ams refs validateToken          # who calls it
 | `ams build [path]` | — | full index (init + reindex) at `<path>/.ams/index.db`; `--force` reparses all |
 | `ams describe <file\|dir>...` | `Read` of a whole file | signatures with `@start-end` spans |
 | `ams find <name>` | `Grep` for `fn X\|class X` | definitions: file, span, signature |
+| `ams search <words>` | not really possible | full-text over names/signatures/docs, ranked (FTS5) |
 | `ams refs <name>` | `Grep` for a name, with noise | usages: file, line |
-| `ams tree [dir]` | `Glob` + a series of `Read`s | one line per file: loc, api count, used-by, deps |
+| `ams tree [dir]` | `Glob` + a series of `Read`s | one line per file; auto directory rollup on big projects; `--hubs`, `--depth N` |
 | `ams related <file>` | manually reading imports | deps + reverse deps (used-by) |
 | `ams annotate <file>:<Symbol.path> "doc"` | — | attach an LLM note to a symbol |
 
@@ -109,6 +110,25 @@ src/router.ts   ts   340 loc  api:3   used-by:2   express
 ```
 
 High `api` + high `used-by` marks the hub files of a project.
+
+### `ams search` — find by meaning
+
+Docstrings and doc comments (`///`, `/** */`, `"""..."""`, `//`) are
+extracted into the index (shown as `doc*:` in `describe`) and searchable
+together with symbol names and signatures. CamelCase/snake_case names are
+word-split, terms are prefix-matched, any human language works:
+
+```
+$ ams search password
+src/Security/Hasher/PasswordHash.php:7-13  [class] PasswordHash exported
+$ ams search Проверяет
+src/AccessRights/RoleManager.php:20-23  [method] RoleManager.canManage exported
+  doc*: Проверяет, может ли одна роль управлять другой ролью
+```
+
+This closes the loop with the skill recommendation "give every new function
+a one-line docstring": agents document code as they write it, and the index
+makes it findable by meaning for free.
 
 ### `ams find`
 

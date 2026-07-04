@@ -61,6 +61,8 @@ pub struct ParsedSymbol {
     pub exported: bool,
     /// blake3 hex of the full node text; anchors annotations.
     pub body_hash: String,
+    /// First meaningful line of the source doc comment / docstring.
+    pub doc: Option<String>,
     pub children: Vec<ParsedSymbol>,
 }
 
@@ -118,6 +120,9 @@ pub struct SymbolInfo {
     pub start_line: u32,
     pub end_line: u32,
     pub exported: bool,
+    /// From the source (docstring / doc comment).
+    pub docstring: Option<String>,
+    /// From `ams annotate` (out-of-band LLM note).
     pub doc: Option<String>,
     pub doc_stale: bool,
     pub children: Vec<SymbolInfo>,
@@ -132,6 +137,7 @@ pub struct FindHit {
     pub start_line: u32,
     pub end_line: u32,
     pub exported: bool,
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

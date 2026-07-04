@@ -1,4 +1,4 @@
-use super::{body_hash, count_loc, line_span, node_text, signature, unquote, LangParser};
+use super::{body_hash, preceding_doc, count_loc, line_span, node_text, signature, unquote, LangParser};
 use crate::model::{ParsedFile, ParsedSymbol, RefKind, RefOccurrence, SymbolKind};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -171,6 +171,7 @@ fn collect_top(
                     end_line: end,
                     exported,
                     body_hash: body_hash(src, node),
+                    doc: preceding_doc(node, src),
                     children: vec![],
                 });
             }
@@ -230,6 +231,7 @@ fn collect_top(
                         end_line: end,
                         exported: true,
                         body_hash: body_hash(src, node),
+                        doc: preceding_doc(node, src),
                         children: vec![],
                     });
                 } else if right.kind() == "identifier" {
@@ -295,6 +297,7 @@ fn simple_symbol(node: Node, src: &str, kind: SymbolKind, exported: bool) -> Opt
         end_line: end,
         exported,
         body_hash: body_hash(src, node),
+        doc: preceding_doc(node, src),
         children: vec![],
     })
 }

@@ -137,6 +137,7 @@ fn collect_const(stmt: Node, assignment: Node, src: &str, out: &mut ParsedFile) 
         end_line: end,
         exported: is_exported_name(name),
         body_hash: body_hash(src, stmt),
+        doc: None,
         children: vec![],
     });
 }
@@ -196,8 +197,34 @@ fn simple_symbol(
         end_line: end,
         exported,
         body_hash: body_hash(src, outer),
+        doc: docstring(inner, src),
         children: vec![],
     })
+}
+
+/// First non-empty line of a function/class docstring (first statement in
+/// the body being a string literal).
+fn docstring(inner: Node, src: &str) -> Option<String> {
+    let body = inner.child_by_field_name("body")?;
+    let first = body.named_child(0)?;
+    if first.kind() != "expression_statement" {
+        return None;
+    }
+    let s = first.named_child(0)?;
+    if s.kind() != "string" {
+        return None;
+    }
+    for line in node_text(src, s).lines() {
+        let t = line
+            .trim()
+            .trim_start_matches(|c| matches!(c, 'r' | 'b' | 'u' | 'f' | 'R' | 'B' | 'U' | 'F'))
+            .trim_matches(|c| c == '"' || c == '\'')
+            .trim();
+        if !t.is_empty() {
+            return Some(super::cap_line(t));
+        }
+    }
+    None
 }
 
 fn collect_refs(root: Node, src: &str, refs: &mut Vec<RefOccurrence>) {

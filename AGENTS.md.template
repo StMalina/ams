@@ -39,6 +39,8 @@ no `.ams/` yet, run `ams build` at the root.
   passed as handler/callback, e.g. router registrations). Dynamic dispatch
   and string-based lookups are not indexed — fall back to grep if in doubt.
 - `ams find <name>` — where a symbol is defined (substring, exact spans).
+- `ams search <words>` — full-text over names/signatures/docstrings when the
+  exact name is unknown (camelCase word-split, prefix match, any language).
 
 ### Rarely needed
 

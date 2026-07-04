@@ -511,3 +511,49 @@ fn php_functions_inside_control_flow_blocks() {
     let f = parsed.symbols.iter().find(|s| s.name == "legacy_helper").expect("nested fn");
     assert_eq!((f.start_line, f.end_line), (3, 5));
 }
+
+// ---------------------------------------------------------------------
+// Docstrings / doc comments
+
+#[test]
+fn docstrings_extracted_per_language() {
+    // Rust ///
+    let rs = "/// Validates the JWT and loads the session.\npub fn check(t: &str) -> bool {\n    true\n}\n";
+    let p = ams_core::parser::parser_for_ext("rs").unwrap().parse(rs).unwrap();
+    assert_eq!(
+        find(&p.symbols, "check").doc.as_deref(),
+        Some("Validates the JWT and loads the session.")
+    );
+
+    // Python docstring
+    let py = "def sync(dept):\n    \"\"\"Syncs members with the external registry.\"\"\"\n    pass\n";
+    let p = ams_core::parser::parser_for_ext("py").unwrap().parse(py).unwrap();
+    assert_eq!(
+        find(&p.symbols, "sync").doc.as_deref(),
+        Some("Syncs members with the external registry.")
+    );
+
+    // JSDoc above exported function
+    let ts = "/**\n * Refreshes the access token pair.\n * @param token old token\n */\nexport function refresh(token: string): string {\n  return token\n}\n";
+    let p = ams_core::parser::parser_for_ext("ts").unwrap().parse(ts).unwrap();
+    assert_eq!(
+        find(&p.symbols, "refresh").doc.as_deref(),
+        Some("Refreshes the access token pair.")
+    );
+
+    // Go convention comment
+    let go = "package x\n\n// Fetch downloads the manifest from the CDN.\nfunc Fetch(url string) error {\n\treturn nil\n}\n";
+    let p = ams_core::parser::parser_for_ext("go").unwrap().parse(go).unwrap();
+    assert_eq!(
+        find(&p.symbols, "Fetch").doc.as_deref(),
+        Some("Fetch downloads the manifest from the CDN.")
+    );
+
+    // phpdoc
+    let php = "<?php\n/**\n * Recalculates member access rights.\n */\nfunction recalc($id) {\n    return $id;\n}\n";
+    let p = ams_core::parser::parser_for_ext("php").unwrap().parse(php).unwrap();
+    assert_eq!(
+        find(&p.symbols, "recalc").doc.as_deref(),
+        Some("Recalculates member access rights.")
+    );
+}

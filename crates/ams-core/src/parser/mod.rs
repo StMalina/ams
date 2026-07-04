@@ -97,6 +97,71 @@ pub(crate) fn unquote(s: &str) -> String {
     s.trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string()
 }
 
+/// First meaningful line of the doc comment directly above a symbol
+/// (`///`, `//!`, `/** */`, `//`). Skips tag lines (`@param`), TODO/FIXME,
+/// and linter pragmas. Python docstrings are handled in the Python parser.
+pub(crate) fn preceding_doc(node: Node, src: &str) -> Option<String> {
+    let mut anchor = node;
+    while let Some(p) = anchor.parent() {
+        if matches!(p.kind(), "export_statement" | "decorated_definition") {
+            anchor = p;
+        } else {
+            break;
+        }
+    }
+    let mut comments: Vec<Node> = Vec::new();
+    let mut cur = anchor;
+    for _ in 0..20 {
+        let Some(sib) = cur.prev_named_sibling() else {
+            break;
+        };
+        if !sib.kind().contains("comment") {
+            break;
+        }
+        // adjacency: no blank-line gap between the comment and the symbol
+        if cur.start_position().row.saturating_sub(sib.end_position().row) > 1 {
+            break;
+        }
+        comments.push(sib);
+        cur = sib;
+    }
+    for c in comments.iter().rev() {
+        for line in node_text(src, *c).lines() {
+            let t = line
+                .trim()
+                .trim_start_matches("/**")
+                .trim_start_matches("/*!")
+                .trim_start_matches("/*")
+                .trim_start_matches("//!")
+                .trim_start_matches("///")
+                .trim_start_matches("//")
+                .trim_start_matches('*')
+                .trim_end_matches("*/")
+                .trim();
+            if t.is_empty()
+                || t.starts_with('@')
+                || t.starts_with("TODO")
+                || t.starts_with("FIXME")
+                || t.contains("eslint-")
+                || t.contains("prettier-")
+                || t.starts_with("#[")
+            {
+                continue;
+            }
+            return Some(cap_line(t));
+        }
+    }
+    None
+}
+
+pub(crate) fn cap_line(t: &str) -> String {
+    if t.chars().count() > 120 {
+        t.chars().take(117).collect::<String>() + "..."
+    } else {
+        t.to_string()
+    }
+}
+
 /// Identifiers read as values (`route(handler)`, `map(parse)`) — catches the
 /// references that call-position tracking misses, e.g. router registrations.
 /// Language-agnostic heuristic over field names / parent kinds; capped at 5

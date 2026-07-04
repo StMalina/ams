@@ -22,7 +22,9 @@ src/auth.ts   ts   820 loc  api:8   used-by:12   jwt,redis
 src/util.ts   ts    40 loc  api:2   used-by:31
 ```
 
-High `api` + high `used-by` = hub file, start there.
+High `api` + high `used-by` = hub file, start there. On big projects the
+output auto-rolls-up by directory; `--hubs` shows the top-20 most-imported
+files, `--depth 0` forces the flat list.
 
 **2. See inside a file — `ams describe <file>`** (instead of Read)
 
@@ -30,11 +32,15 @@ High `api` + high `used-by` = hub file, start there.
 $ ams describe src/auth.ts
 src/auth.ts [820 loc, ts, used-by:12]
   function validateToken(token: string): User | null  @42-78 exported
+    doc*: Validates the JWT and loads the session
   class AuthService  @97-410 exported
     async login(creds): Promise<Session>  @103-160
       doc: creates session only after 2FA passes
   imports: jwt, redis, ./session
 ```
+
+`doc*` comes from the source (docstring/doc comment); `doc` is an
+out-of-band `ams annotate` note.
 
 **3. Read only the body you need — `Read` with the span**
 
@@ -51,6 +57,10 @@ Never read a whole file when you already have its spans.
   fall back to Grep.
 - `ams find <name>` — where a symbol is defined (substring match, exact spans,
   cross-language).
+- `ams search <words>` — full-text search over names, signatures, and docs
+  when you don't know the exact name: `ams search password reset` finds
+  `MemberPasswordGenerator` (camelCase is word-split; prefixes match; works
+  in any language, including Cyrillic docstrings).
 
 ## Rarely needed, good to know
 

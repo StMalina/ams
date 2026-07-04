@@ -42,6 +42,17 @@ enum Cmd {
     /// One-line-per-file overview of the project or a directory
     Tree {
         dir: Option<String>,
+        /// Aggregate by directory at this depth (0 = flat file list)
+        #[arg(long)]
+        depth: Option<usize>,
+        /// Show only the top files by reverse-dependency count
+        #[arg(long)]
+        hubs: bool,
+    },
+    /// Full-text search over names, signatures, and docs ("find by meaning")
+    Search {
+        /// Words to search for (AND-ed)
+        terms: Vec<String>,
     },
     /// Find symbol definitions by (sub)name
     Find {
@@ -141,13 +152,54 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Cmd::Tree { dir } => {
+        Cmd::Tree { dir, depth, hubs } => {
             let prefix = dir.map(|d| idx.rel_path(&d)).transpose()?;
-            let entries = idx.tree(prefix.as_deref().filter(|s| !s.is_empty()))?;
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&entries)?);
+            let prefix = prefix.as_deref().filter(|s| !s.is_empty());
+            let mut entries = idx.tree(prefix)?;
+            if hubs {
+                entries.sort_by(|a, b| b.used_by_count.cmp(&a.used_by_count));
+                entries.truncate(20);
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&entries)?);
+                } else {
+                    print!("{}", format::tree(&entries));
+                }
             } else {
-                print!("{}", format::tree(&entries));
+                // Big projects: a flat 5000-line listing defeats the purpose —
+                // roll up by top-level directory unless told otherwise.
+                let depth = match depth {
+                    Some(d) => d,
+                    None if entries.len() > 300 => {
+                        println!(
+                            "{} files — rolled up by directory (use --depth 0 for the flat list, --hubs for top files)",
+                            entries.len()
+                        );
+                        1
+                    }
+                    None => 0,
+                };
+                if cli.json {
+                    if depth == 0 {
+                        println!("{}", serde_json::to_string_pretty(&entries)?);
+                    } else {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&format::rollup(&entries, prefix, depth))?
+                        );
+                    }
+                } else if depth == 0 {
+                    print!("{}", format::tree(&entries));
+                } else {
+                    print!("{}", format::tree_rollup(&entries, prefix, depth));
+                }
+            }
+        }
+        Cmd::Search { terms } => {
+            let hits = idx.search(&terms.join(" "))?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+            } else {
+                print!("{}", format::find(&hits, &terms.join(" ")));
             }
         }
         Cmd::Find {

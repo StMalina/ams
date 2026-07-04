@@ -32,6 +32,10 @@ fn push_symbol(out: &mut String, s: &SymbolInfo, depth: usize, exported_only: bo
         s.end_line,
         if s.exported { " exported" } else { "" }
     ));
+    // doc* = from the source (docstring); doc = out-of-band annotate note
+    if let Some(d) = &s.docstring {
+        out.push_str(&format!("{}  doc*: {}\n", indent, d));
+    }
     if let Some(doc) = &s.doc {
         out.push_str(&format!(
             "{}  doc: {}{}\n",
@@ -85,6 +89,84 @@ pub fn find(hits: &[FindHit], pattern: &str) -> String {
             if h.exported { " exported" } else { "" },
             h.signature
         ));
+        if let Some(d) = &h.doc {
+            out.push_str(&format!("  doc*: {d}\n"));
+        }
+    }
+    out
+}
+
+#[derive(serde::Serialize)]
+pub struct DirRollup {
+    pub dir: String,
+    pub files: u32,
+    pub loc: u32,
+    pub api: u32,
+    pub langs: Vec<String>,
+    pub hub: Option<(String, u32)>,
+}
+
+/// Aggregate per-file entries into directory groups at `depth` path
+/// components below `prefix`.
+pub fn rollup(entries: &[TreeEntry], prefix: Option<&str>, depth: usize) -> Vec<DirRollup> {
+    use std::collections::BTreeMap;
+    let strip = prefix.map(|p| format!("{}/", p.trim_end_matches('/')));
+    let mut groups: BTreeMap<String, Vec<&TreeEntry>> = BTreeMap::new();
+    for e in entries {
+        let rel = match &strip {
+            Some(s) => e.path.strip_prefix(s.as_str()).unwrap_or(&e.path),
+            None => &e.path,
+        };
+        let comps: Vec<&str> = rel.split('/').collect();
+        let key = if comps.len() > depth {
+            comps[..depth].join("/") + "/"
+        } else {
+            // file sits above the rollup depth — list it by itself
+            rel.to_string()
+        };
+        groups.entry(key).or_default().push(e);
+    }
+    groups
+        .into_iter()
+        .map(|(dir, es)| {
+            let mut langs: Vec<String> = es.iter().map(|e| e.lang.clone()).collect();
+            langs.sort();
+            langs.dedup();
+            let hub = es
+                .iter()
+                .max_by_key(|e| e.used_by_count)
+                .filter(|e| e.used_by_count > 0)
+                .map(|e| (e.path.clone(), e.used_by_count));
+            DirRollup {
+                dir,
+                files: es.len() as u32,
+                loc: es.iter().map(|e| e.loc).sum(),
+                api: es.iter().map(|e| e.api_count).sum(),
+                langs,
+                hub,
+            }
+        })
+        .collect()
+}
+
+pub fn tree_rollup(entries: &[TreeEntry], prefix: Option<&str>, depth: usize) -> String {
+    let rolled = rollup(entries, prefix, depth);
+    let w = rolled.iter().map(|r| r.dir.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for r in &rolled {
+        out.push_str(&format!(
+            "{:<w$}  {:>4} files  {:>7} loc  api:{:<5} {}",
+            r.dir,
+            r.files,
+            r.loc,
+            r.api,
+            r.langs.join(","),
+            w = w
+        ));
+        if let Some((hub, n)) = &r.hub {
+            out.push_str(&format!("  hub: {hub} (used-by {n})"));
+        }
+        out.push('\n');
     }
     out
 }

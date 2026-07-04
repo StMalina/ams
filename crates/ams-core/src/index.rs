@@ -90,7 +90,8 @@ impl Index {
                start_line INTEGER NOT NULL,
                end_line INTEGER NOT NULL,
                exported INTEGER NOT NULL,
-               body_hash TEXT NOT NULL
+               body_hash TEXT NOT NULL,
+               doc TEXT
              );
              CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
              CREATE INDEX IF NOT EXISTS symbols_file ON symbols(file_id);
@@ -116,12 +117,15 @@ impl Index {
              CREATE TABLE IF NOT EXISTS meta(
                key TEXT PRIMARY KEY,
                value TEXT NOT NULL
-             );",
+             );
+             CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts
+               USING fts5(name, signature, doc, path);",
         )?;
-        // Migration for pre-0.2 databases (refs had no kind column).
+        // Migrations for older databases.
         let _ = self
             .conn
             .execute("ALTER TABLE refs ADD COLUMN kind TEXT NOT NULL DEFAULT 'call'", []);
+        let _ = self.conn.execute("ALTER TABLE symbols ADD COLUMN doc TEXT", []);
         // Parser output changes between versions; stored signatures from an
         // older binary would silently diverge. Wipe files (annotations are
         // hash-anchored and survive) and let sync() reparse everything.
@@ -135,7 +139,7 @@ impl Index {
             )
             .optional()?;
         if stored.as_deref() != Some(version) {
-            self.conn.execute("DELETE FROM files", [])?;
+            self.clear_files()?;
             self.conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES ('parser_version', ?1)",
                 params![version],
@@ -147,6 +151,7 @@ impl Index {
     /// Drop all indexed data (annotations survive); next sync reparses from scratch.
     pub fn clear_files(&self) -> Result<()> {
         self.conn.execute("DELETE FROM files", [])?;
+        self.conn.execute("DELETE FROM symbols_fts", [])?;
         Ok(())
     }
 
@@ -322,10 +327,11 @@ impl Index {
         annotations: &HashMap<String, (String, String)>,
     ) -> Result<Vec<SymbolInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, kind, signature, start_line, end_line, exported, body_hash
+            "SELECT id, name, kind, signature, start_line, end_line, exported, body_hash, doc
              FROM symbols WHERE file_id = ?1 AND parent_id IS ?2 ORDER BY start_line",
         )?;
-        let rows: Vec<(i64, String, String, String, u32, u32, bool, String)> = stmt
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(i64, String, String, String, u32, u32, bool, String, Option<String>)> = stmt
             .query_map(params![file_id, parent_id], |r| {
                 Ok((
                     r.get(0)?,
@@ -336,12 +342,13 @@ impl Index {
                     r.get(5)?,
                     r.get(6)?,
                     r.get(7)?,
+                    r.get(8)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
 
         let mut out = Vec::with_capacity(rows.len());
-        for (id, name, kind, sig, start, end, exported, body_hash) in rows {
+        for (id, name, kind, sig, start, end, exported, body_hash, docstring) in rows {
             let symbol_path = if prefix.is_empty() {
                 name.clone()
             } else {
@@ -360,6 +367,7 @@ impl Index {
                 start_line: start,
                 end_line: end,
                 exported,
+                docstring,
                 doc,
                 doc_stale,
             });
@@ -385,7 +393,7 @@ impl Index {
         exported_only: bool,
     ) -> Result<Vec<FindHit>> {
         let mut sql = String::from(
-            "SELECT f.path, s.name, p.name, s.kind, s.signature, s.start_line, s.end_line, s.exported
+            "SELECT f.path, s.name, p.name, s.kind, s.signature, s.start_line, s.end_line, s.exported, s.doc
              FROM symbols s
              JOIN files f ON f.id = s.file_id
              LEFT JOIN symbols p ON p.id = s.parent_id
@@ -417,6 +425,52 @@ impl Index {
                     start_line: r.get(5)?,
                     end_line: r.get(6)?,
                     exported: r.get(7)?,
+                    doc: r.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Full-text search over symbol names, signatures, and docs (docstrings
+    /// plus annotate notes). Terms are AND-ed; ranked by bm25.
+    pub fn search(&self, query: &str) -> Result<Vec<FindHit>> {
+        // Quote (syntax-safe) and prefix-match each term: `passw` finds `password`.
+        let fts_query = query
+            .split_whitespace()
+            .map(|t| format!("\"{}\"*", t.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if fts_query.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT fl.path, s.name, p.name, s.kind, s.signature,
+                        s.start_line, s.end_line, s.exported, s.doc
+                 FROM symbols_fts f
+                 JOIN symbols s ON s.id = f.rowid
+                 JOIN files fl ON fl.id = s.file_id
+                 LEFT JOIN symbols p ON p.id = s.parent_id
+                 WHERE symbols_fts MATCH ?1
+                 ORDER BY rank LIMIT 20",
+            )?
+            .query_map(params![fts_query], |r| {
+                let name: String = r.get(1)?;
+                let parent: Option<String> = r.get(2)?;
+                let kind_s: String = r.get(3)?;
+                Ok(FindHit {
+                    path: r.get(0)?,
+                    symbol_path: match parent {
+                        Some(p) => format!("{p}.{name}"),
+                        None => name,
+                    },
+                    kind: SymbolKind::from_str(&kind_s).unwrap_or(SymbolKind::Function),
+                    signature: r.get(4)?,
+                    start_line: r.get(5)?,
+                    end_line: r.get(6)?,
+                    exported: r.get(7)?,
+                    doc: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
@@ -548,6 +602,21 @@ impl Index {
             "INSERT OR REPLACE INTO annotations(key, body_hash, doc) VALUES (?1, ?2, ?3)",
             params![format!("{rel}:{symbol_path}"), body_hash, doc],
         )?;
+        // Make the note findable via full-text search alongside the docstring.
+        let sym_id = parent_id.unwrap();
+        let docstring: Option<String> = self.conn.query_row(
+            "SELECT doc FROM symbols WHERE id = ?1",
+            params![sym_id],
+            |r| r.get(0),
+        )?;
+        let combined = match docstring {
+            Some(d) => format!("{d} {doc}"),
+            None => doc.to_string(),
+        };
+        self.conn.execute(
+            "UPDATE symbols_fts SET doc = ?1 WHERE rowid = ?2",
+            params![combined, sym_id],
+        )?;
         Ok(())
     }
 
@@ -575,7 +644,13 @@ fn upsert_file(
     size: i64,
 ) -> Result<()> {
     // Full replace: cascade wipes symbols/imports/refs; annotations live in
-    // their own table keyed by path+symbol and survive.
+    // their own table keyed by path+symbol and survive. FTS rows are not
+    // FK-aware — clear them explicitly before the cascade removes symbols.
+    tx.execute(
+        "DELETE FROM symbols_fts WHERE rowid IN
+           (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = ?1)",
+        params![rel],
+    )?;
     tx.execute("DELETE FROM files WHERE path = ?1", params![rel])?;
     tx.execute(
         "INSERT INTO files(path, lang, loc, hash, mtime, size) VALUES (?1,?2,?3,?4,?5,?6)",
@@ -584,19 +659,16 @@ fn upsert_file(
     let file_id = tx.last_insert_rowid();
 
     for sym in &parsed.symbols {
-        insert_symbol(tx, file_id, None, sym)?;
+        insert_symbol(tx, file_id, None, sym, rel)?;
     }
+    let mut imp = tx.prepare_cached("INSERT INTO imports(file_id, target) VALUES (?1, ?2)")?;
     for target in &parsed.imports {
-        tx.execute(
-            "INSERT INTO imports(file_id, target) VALUES (?1, ?2)",
-            params![file_id, target],
-        )?;
+        imp.execute(params![file_id, target])?;
     }
+    let mut rf = tx
+        .prepare_cached("INSERT INTO refs(file_id, name, line, kind) VALUES (?1, ?2, ?3, ?4)")?;
     for r in &parsed.refs {
-        tx.execute(
-            "INSERT INTO refs(file_id, name, line, kind) VALUES (?1, ?2, ?3, ?4)",
-            params![file_id, r.name, r.line, r.kind.as_str()],
-        )?;
+        rf.execute(params![file_id, r.name, r.line, r.kind.as_str()])?;
     }
     Ok(())
 }
@@ -606,27 +678,65 @@ fn insert_symbol(
     file_id: i64,
     parent_id: Option<i64>,
     sym: &ParsedSymbol,
+    rel: &str,
 ) -> Result<()> {
-    tx.execute(
-        "INSERT INTO symbols(file_id, parent_id, name, kind, signature, start_line, end_line, exported, body_hash)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-        params![
-            file_id,
-            parent_id,
-            sym.name,
-            sym.kind.as_str(),
-            sym.signature,
-            sym.start_line,
-            sym.end_line,
-            sym.exported,
-            sym.body_hash
-        ],
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO symbols(file_id, parent_id, name, kind, signature, start_line, end_line, exported, body_hash, doc)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
     )?;
+    stmt.execute(params![
+        file_id,
+        parent_id,
+        sym.name,
+        sym.kind.as_str(),
+        sym.signature,
+        sym.start_line,
+        sym.end_line,
+        sym.exported,
+        sym.body_hash,
+        sym.doc
+    ])?;
     let id = tx.last_insert_rowid();
+    // FTS default tokenizer treats `MemberPasswordGenerator` as one token —
+    // index the split words alongside the original so `search password` hits.
+    let name_tokens = format!("{} {}", sym.name, split_ident(&sym.name));
+    tx.prepare_cached(
+        "INSERT INTO symbols_fts(rowid, name, signature, doc, path) VALUES (?1,?2,?3,?4,?5)",
+    )?
+    .execute(params![
+        id,
+        name_tokens,
+        sym.signature,
+        sym.doc.as_deref().unwrap_or(""),
+        rel
+    ])?;
     for ch in &sym.children {
-        insert_symbol(tx, file_id, Some(id), ch)?;
+        insert_symbol(tx, file_id, Some(id), ch, rel)?;
     }
     Ok(())
+}
+
+/// `MemberPasswordGenerator` / `get_user_id` -> "member password generator" /
+/// "get user id".
+fn split_ident(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 8);
+    let mut prev_lower = false;
+    for ch in name.chars() {
+        if ch == '_' || ch == '-' {
+            out.push(' ');
+            prev_lower = false;
+        } else if ch.is_uppercase() {
+            if prev_lower {
+                out.push(' ');
+            }
+            out.extend(ch.to_lowercase());
+            prev_lower = false;
+        } else {
+            out.push(ch);
+            prev_lower = ch.is_lowercase();
+        }
+    }
+    out
 }
 
 /// Resolve import targets to indexed files. JS/TS `./relative`, Python

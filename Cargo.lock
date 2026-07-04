@@ -25,18 +25,19 @@ dependencies = [
 
 [[package]]
 name = "ams-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ams-core",
  "anyhow",
  "clap",
  "libc",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "ams-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",

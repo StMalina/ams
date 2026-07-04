@@ -1,4 +1,4 @@
-use super::{body_hash, collapse, count_loc, line_span, node_text, signature, LangParser};
+use super::{body_hash, preceding_doc, collapse, count_loc, line_span, node_text, signature, LangParser};
 use crate::model::{ParsedFile, ParsedSymbol, RefKind, RefOccurrence, SymbolKind};
 use anyhow::{Context, Result};
 use tree_sitter::Node;
@@ -126,6 +126,7 @@ fn simple_symbol(node: Node, src: &str, kind: SymbolKind) -> Option<ParsedSymbol
         end_line: end,
         exported: has_pub(node),
         body_hash: body_hash(src, node),
+        doc: preceding_doc(node, src),
         children: vec![],
     })
 }
@@ -164,6 +165,7 @@ fn build_impl(node: Node, src: &str) -> Option<ParsedSymbol> {
         end_line: end,
         exported: false,
         body_hash: body_hash(src, node),
+        doc: preceding_doc(node, src),
         children,
     })
 }
