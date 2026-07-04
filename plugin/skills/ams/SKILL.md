@@ -54,9 +54,13 @@ Never read a whole file when you already have its spans.
 
 ## Rarely needed, good to know
 
-- `ams annotate <file>:<Symbol.path> "note"` — persist a non-obvious insight
-  (why, not what). Survives reindexing; flagged `[stale]` if the body changes.
-  Annotate when you spent real effort understanding a function.
+- **When you write a new function, give it a one-line docstring/doc-comment**
+  (the *why/purpose*, not a restatement of the signature). It gets indexed
+  for free and makes the code findable by meaning later.
+- `ams annotate <file>:<Symbol.path> "note"` — same idea for code you should
+  NOT edit (legacy, third-party, foreign modules): persist a non-obvious
+  insight out-of-band. Survives reindexing; flagged `[stale]` if the body
+  changes.
 - `--exported` (describe/find) — public surface only; `--kind fn|class|...` on find.
 - `--json` — machine-readable output.
 - `ams build --force` — full reparse (only after an ams binary upgrade acts odd).

@@ -42,10 +42,13 @@ no `.ams/` yet, run `ams build` at the root.
 
 ### Rarely needed
 
-`ams annotate <file>:<Symbol.path> "note"` — persist a non-obvious insight
-(why, not what); survives reindexing, flagged `[stale]` when the body
-changes. `--exported`, `--kind`, `--json` flags. `ams build --force` after a
-binary upgrade.
+When writing a new function, give it a one-line docstring/doc-comment (the
+*why*, not a restatement of the signature) — it gets indexed for free.
+For code you should NOT edit (legacy, third-party), use
+`ams annotate <file>:<Symbol.path> "note"` — an out-of-band insight that
+survives reindexing and is flagged `[stale]` when the body changes.
+Flags: `--exported`, `--kind`, `--json`; `ams build --force` after a binary
+upgrade.
 
 **Not a grep replacement:** strings, log lines, config values → still
 `rg`/`grep`. Supported languages: TypeScript/TSX, JavaScript/JSX
