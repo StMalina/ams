@@ -256,6 +256,65 @@ pub fn refs(hits: &[RefHit], name: &str) -> String {
     out
 }
 
+fn human_bytes(b: i64) -> String {
+    if b < 1024 {
+        format!("{b} B")
+    } else if b < 1024 * 1024 {
+        format!("{:.1} KB", b as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", b as f64 / (1024.0 * 1024.0))
+    }
+}
+
+pub fn gain(rows: &[GainRow]) -> String {
+    if rows.is_empty() {
+        return "no queries recorded yet — describe/tree/find/refs/search/related \
+                log output size vs covered source here\n"
+            .to_string();
+    }
+    let mut out = format!(
+        "{:<10} {:>6} {:>10} {:>12} {:>7}\n",
+        "cmd", "calls", "output", "source", "ratio"
+    );
+    let (mut calls, mut output, mut source) = (0i64, 0i64, 0i64);
+    for r in rows {
+        let ratio = if r.output_bytes > 0 {
+            format!("{:.0}x", r.source_bytes as f64 / r.output_bytes as f64)
+        } else {
+            "-".to_string()
+        };
+        out.push_str(&format!(
+            "{:<10} {:>6} {:>10} {:>12} {:>7}\n",
+            r.cmd,
+            r.calls,
+            human_bytes(r.output_bytes),
+            human_bytes(r.source_bytes),
+            ratio,
+        ));
+        calls += r.calls;
+        output += r.output_bytes;
+        source += r.source_bytes;
+    }
+    let ratio = if output > 0 {
+        format!("{:.0}x", source as f64 / output as f64)
+    } else {
+        "-".to_string()
+    };
+    out.push_str(&format!(
+        "{:<10} {:>6} {:>10} {:>12} {:>7}\n",
+        "total",
+        calls,
+        human_bytes(output),
+        human_bytes(source),
+        ratio,
+    ));
+    out.push_str(
+        "source = files covered by answers (what a full read would cost); \
+         output = what ams actually printed\n",
+    );
+    out
+}
+
 pub fn related(info: &RelatedInfo) -> String {
     let mut out = format!("{}\n", info.path);
     if !info.internal_deps.is_empty() {

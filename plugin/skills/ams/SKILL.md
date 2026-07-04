@@ -73,6 +73,7 @@ Never read a whole file when you already have its spans.
   NOT edit (legacy, third-party, foreign modules): persist a non-obvious
   insight out-of-band. Survives reindexing; flagged `[stale]` if the body
   changes.
+- `ams gain` — accumulated token savings (output printed vs source covered).
 - `--exported` (describe/find) — public surface only; `--kind fn|class|...` on find.
 - `--json` — machine-readable output.
 - `ams build --force` — full reparse (only after an ams binary upgrade acts odd).

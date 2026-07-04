@@ -164,3 +164,12 @@ pub struct RelatedInfo {
     pub external_deps: Vec<String>,
     pub used_by: Vec<String>,
 }
+
+/// Aggregated per-command usage stats for `ams gain`.
+#[derive(Debug, Serialize)]
+pub struct GainRow {
+    pub cmd: String,
+    pub calls: i64,
+    pub output_bytes: i64,
+    pub source_bytes: i64,
+}

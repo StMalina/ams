@@ -118,6 +118,12 @@ impl Index {
                key TEXT PRIMARY KEY,
                value TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS stats(
+               ts INTEGER NOT NULL,
+               cmd TEXT NOT NULL,
+               output_bytes INTEGER NOT NULL,
+               source_bytes INTEGER NOT NULL
+             );
              CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts
                USING fts5(name, signature, doc, path);",
         )?;
@@ -471,6 +477,53 @@ impl Index {
                     end_line: r.get(6)?,
                     exported: r.get(7)?,
                     doc: r.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Record one query's output size vs the source bytes it covered
+    /// (the files the agent would otherwise have read). Powers `ams gain`.
+    pub fn log_stat(&self, cmd: &str, output_bytes: usize, paths: &[&str]) -> Result<()> {
+        let unique: HashSet<&str> = paths.iter().copied().collect();
+        let mut source: i64 = 0;
+        {
+            let mut stmt = self
+                .conn
+                .prepare_cached("SELECT size FROM files WHERE path = ?1")?;
+            for p in unique {
+                if let Some(sz) = stmt
+                    .query_row(params![p], |r| r.get::<_, i64>(0))
+                    .optional()?
+                {
+                    source += sz;
+                }
+            }
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO stats(ts, cmd, output_bytes, source_bytes) VALUES (?1, ?2, ?3, ?4)",
+            params![ts, cmd, output_bytes as i64, source],
+        )?;
+        Ok(())
+    }
+
+    pub fn gain(&self) -> Result<Vec<GainRow>> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT cmd, COUNT(*), SUM(output_bytes), SUM(source_bytes)
+                 FROM stats GROUP BY cmd ORDER BY COUNT(*) DESC",
+            )?
+            .query_map([], |r| {
+                Ok(GainRow {
+                    cmd: r.get(0)?,
+                    calls: r.get(1)?,
+                    output_bytes: r.get(2)?,
+                    source_bytes: r.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)

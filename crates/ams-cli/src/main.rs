@@ -75,6 +75,8 @@ enum Cmd {
     Related {
         file: String,
     },
+    /// Token savings so far: per-command output size vs covered source size
+    Gain,
     /// Attach a doc note to a symbol: ams annotate src/auth.ts:AuthService.login "..."
     Annotate {
         /// Target as <file>:<Symbol.path>
@@ -147,25 +149,30 @@ fn run() -> Result<()> {
                     descriptions.push(idx.describe(&rel)?);
                 }
             }
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&descriptions)?);
+            let out = if cli.json {
+                format!("{}\n", serde_json::to_string_pretty(&descriptions)?)
             } else {
-                for d in &descriptions {
-                    print!("{}", format::describe(d, exported));
-                }
-            }
+                descriptions
+                    .iter()
+                    .map(|d| format::describe(d, exported))
+                    .collect()
+            };
+            print!("{out}");
+            let paths: Vec<&str> = descriptions.iter().map(|d| d.path.as_str()).collect();
+            let _ = idx.log_stat("describe", out.len(), &paths);
         }
         Cmd::Tree { dir, depth, hubs } => {
             let prefix = dir.map(|d| idx.rel_path(&d)).transpose()?;
             let prefix = prefix.as_deref().filter(|s| !s.is_empty());
             let mut entries = idx.tree(prefix)?;
+            let mut out = String::new();
             if hubs {
                 entries.sort_by(|a, b| b.used_by_count.cmp(&a.used_by_count));
                 entries.truncate(20);
                 if cli.json {
-                    println!("{}", serde_json::to_string_pretty(&entries)?);
+                    out = format!("{}\n", serde_json::to_string_pretty(&entries)?);
                 } else {
-                    print!("{}", format::tree(&entries));
+                    out = format::tree(&entries);
                 }
             } else {
                 // Big projects: a flat 5000-line listing defeats the purpose —
@@ -173,37 +180,44 @@ fn run() -> Result<()> {
                 let depth = match depth {
                     Some(d) => d,
                     None if entries.len() > 300 => {
-                        println!(
-                            "{} files — rolled up by directory (use --depth 0 for the flat list, --hubs for top files)",
-                            entries.len()
-                        );
+                        if !cli.json {
+                            out.push_str(&format!(
+                                "{} files — rolled up by directory (use --depth 0 for the flat list, --hubs for top files)\n",
+                                entries.len()
+                            ));
+                        }
                         1
                     }
                     None => 0,
                 };
                 if cli.json {
-                    if depth == 0 {
-                        println!("{}", serde_json::to_string_pretty(&entries)?);
+                    let json = if depth == 0 {
+                        serde_json::to_string_pretty(&entries)?
                     } else {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&format::rollup(&entries, prefix, depth))?
-                        );
-                    }
+                        serde_json::to_string_pretty(&format::rollup(&entries, prefix, depth))?
+                    };
+                    out.push_str(&json);
+                    out.push('\n');
                 } else if depth == 0 {
-                    print!("{}", format::tree(&entries));
+                    out.push_str(&format::tree(&entries));
                 } else {
-                    print!("{}", format::tree_rollup(&entries, prefix, depth));
+                    out.push_str(&format::tree_rollup(&entries, prefix, depth));
                 }
             }
+            print!("{out}");
+            let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+            let _ = idx.log_stat("tree", out.len(), &paths);
         }
         Cmd::Search { terms } => {
             let hits = idx.search(&terms.join(" "))?;
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&hits)?);
+            let out = if cli.json {
+                format!("{}\n", serde_json::to_string_pretty(&hits)?)
             } else {
-                print!("{}", format::find(&hits, &terms.join(" ")));
-            }
+                format::find(&hits, &terms.join(" "))
+            };
+            print!("{out}");
+            let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+            let _ = idx.log_stat("search", out.len(), &paths);
         }
         Cmd::Find {
             name,
@@ -216,27 +230,46 @@ fn run() -> Result<()> {
                 })
                 .transpose()?;
             let hits = idx.find(&name, kind, exported)?;
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&hits)?);
+            let out = if cli.json {
+                format!("{}\n", serde_json::to_string_pretty(&hits)?)
             } else {
-                print!("{}", format::find(&hits, &name));
-            }
+                format::find(&hits, &name)
+            };
+            print!("{out}");
+            let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+            let _ = idx.log_stat("find", out.len(), &paths);
         }
         Cmd::Refs { name, in_dir } => {
             let hits = idx.refs(&name, in_dir.as_deref())?;
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&hits)?);
+            let out = if cli.json {
+                format!("{}\n", serde_json::to_string_pretty(&hits)?)
             } else {
-                print!("{}", format::refs(&hits, &name));
-            }
+                format::refs(&hits, &name)
+            };
+            print!("{out}");
+            let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+            let _ = idx.log_stat("refs", out.len(), &paths);
         }
         Cmd::Related { file } => {
             let rel = idx.rel_path(&file)?;
             let info = idx.related(&rel)?;
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&info)?);
+            let out = if cli.json {
+                format!("{}\n", serde_json::to_string_pretty(&info)?)
             } else {
-                print!("{}", format::related(&info));
+                format::related(&info)
+            };
+            print!("{out}");
+            let mut paths: Vec<&str> = vec![info.path.as_str()];
+            paths.extend(info.internal_deps.iter().map(String::as_str));
+            paths.extend(info.used_by.iter().map(String::as_str));
+            let _ = idx.log_stat("related", out.len(), &paths);
+        }
+        Cmd::Gain => {
+            let rows = idx.gain()?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                print!("{}", format::gain(&rows));
             }
         }
         Cmd::Annotate { target, doc } => {

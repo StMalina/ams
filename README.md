@@ -93,6 +93,7 @@ ams refs validateToken          # who calls it
 | `ams tree [dir]` | `Glob` + a series of `Read`s | one line per file; auto directory rollup on big projects; `--hubs`, `--depth N` |
 | `ams related <file>` | manually reading imports | deps + reverse deps (used-by) |
 | `ams annotate <file>:<Symbol.path> "doc"` | — | attach an LLM note to a symbol |
+| `ams gain` | — | accumulated token savings: output printed vs source covered |
 
 Flags: `--kind fn|method|class|struct|enum|trait|interface|const|type|mod`
 and `--exported` (on `describe`/`find`), global `--json` for machine-readable
@@ -161,6 +162,25 @@ callbacks, exports. When a name is too common (`get`, `run`: 20+ files) the
 output collapses to per-file counts — narrow it with `--in <dir>`. Dynamic
 dispatch and string-based lookups are not indexed; fall back to text grep
 for those.
+
+### `ams gain` — measure it yourself
+
+Every query logs two numbers into the index: how many bytes ams printed and
+the total size of the source files the answer covered (what full reads would
+have cost). `ams gain` shows the running totals per command:
+
+```
+$ ams gain
+cmd         calls     output       source   ratio
+describe        2    39.4 KB      68.4 KB      2x
+tree            1     3.4 KB       1.7 MB    525x
+refs            1     1.7 KB     880.2 KB    526x
+total           6    49.8 KB       3.6 MB     75x
+```
+
+`source` is an upper bound (an agent wouldn't read every covered file), but
+the asymmetry is the point: navigation answers cost KBs, the files they
+summarize cost MBs.
 
 ### `ams related`
 
