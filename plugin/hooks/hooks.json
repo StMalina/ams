@@ -2,6 +2,9 @@
   "hooks": {
     "SessionStart": [
       {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh"}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "Read", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-read.sh"}]}
     ]
   }
 }

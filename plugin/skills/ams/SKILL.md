@@ -1,6 +1,6 @@
 ---
 name: ams
-description: Navigate code without reading full files. Use before Read on an unfamiliar file, before Grep for a symbol definition, when asked "what's in this file/directory", "where is X defined", "who calls/uses X", or before changing any exported API. Triggers on code navigation, symbol search, directory overview, and impact analysis.
+description: ALWAYS check before Read on an unfamiliar code file or Grep for a symbol — `ams describe <file>` costs 10-40x fewer tokens than Read and gives exact @start-end spans for targeted reads. Also for "what's in this file/directory" (ams tree), "where is X defined" (ams find), "who calls/uses X" (ams refs), and impact analysis before changing any exported API (ams related). Covers TS/JS, Rust, Python, Go, PHP, Java, Kotlin, C#, Ruby.
 ---
 
 # ams — compact code signatures instead of file reads

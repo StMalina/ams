@@ -219,10 +219,36 @@ marketplace):
 (`plugin/.claude-plugin/plugin.json`), a skill
 (`plugin/skills/ams/SKILL.md`) that teaches the agent the
 describe/find/refs/tree/related/annotate workflow in place of raw
-Read/Grep, and a `SessionStart` hook (`plugin/hooks/`) that reminds the
-agent to use `ams` when an index is present, or suggests `ams build` when
-one is missing. The `ams` binary itself is not bundled in the plugin (it's
-platform-specific) — install it separately via `cargo install`.
+Read/Grep, and two hooks (`plugin/hooks/`):
+
+- `SessionStart` — injects the workflow into the session when an index is
+  present, or suggests `ams build` when one is missing.
+- `PreToolUse` on `Read` — the **read guard**: the first `Read` of a large
+  (150+ lines), indexed code file is intercepted once and answered with
+  `ams describe` output instead of the file — signatures with exact spans,
+  so the agent's next `Read` is a targeted `offset/limit`. Repeating the
+  same `Read` passes (so `Edit` chains keep working); targeted reads, small
+  files, and unindexed projects are never touched. Opt out with
+  `AMS_NO_READ_GUARD=1`.
+
+The guard exists because passive hints lose to habit: agents trained on
+grep-and-read keep grepping and reading even with the skill available. The
+guard converts the habitual miss into signatures at exactly the moment of
+use, at the cost of one blocked tool call. The `ams` binary itself is not
+bundled in the plugin (it's platform-specific) — see [Install](#install).
+
+**Global CLAUDE.md** — the strongest passive lever is making the workflow
+part of the agent's standing instructions. Add to `~/.claude/CLAUDE.md`
+(applies to every project, gated on the index existing):
+
+```markdown
+## Code navigation (projects with .ams/index.db)
+Before Read on an unfamiliar code file: `ams describe <file>` — signatures
+with @start-end spans, 10–40× cheaper; then Read only the span.
+Symbol definition: `ams find <name>`. Directory: `ams tree <dir>`.
+Before changing an exported API: `ams refs <name>` + `ams related <file>`.
+Grep only for strings/comments/config. No index yet → `ams build` once.
+```
 
 **Other agents (Codex, Gemini CLI, ...)** — copy the workflow from
 `AGENTS.md.template` into your project's `AGENTS.md`.

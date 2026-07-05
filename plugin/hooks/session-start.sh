@@ -9,7 +9,14 @@ if ! command -v ams >/dev/null 2>&1; then
 fi
 
 if [ -f "$PWD/.ams/index.db" ]; then
-    echo "ams index found in this project — prefer 'ams describe/find/refs/tree' over Read/Grep for code navigation (see the ams skill)."
+    cat <<'EOF'
+ams index active in this project. Code-navigation workflow (mandatory, see the ams skill):
+1. Orient: `ams tree <dir>` — one line per file (loc, api, used-by), instead of Glob + serial Reads.
+2. Inspect: `ams describe <file>` BEFORE Read on any unfamiliar code file — signatures with @start-end spans, 10-40x cheaper than Read.
+3. Read only the span: Read(offset=start, limit=end-start+1). Never a whole file when you have its spans.
+Before changing an exported API: `ams refs <name>` (call sites) + `ams related <file>` (what breaks).
+Symbol definitions: `ams find <name>`, fuzzy/by-meaning: `ams search <words>`. Grep stays for strings/comments/config only.
+EOF
     exit 0
 fi
 
