@@ -1,5 +1,6 @@
 mod format;
 mod init;
+mod update;
 
 use ams_core::model::SymbolKind;
 use ams_core::Index;
@@ -76,14 +77,24 @@ enum Cmd {
     Related {
         file: String,
     },
-    /// Register the AMS workflow in Claude Code (~/.claude/AMS.md + @AMS.md import)
+    /// Register the AMS workflow with coding agents (Claude Code, Codex, Gemini)
     Init {
         /// Print current registration status without changing anything
         #[arg(long)]
         show: bool,
-        /// Remove the AMS.md file and the @AMS.md import from CLAUDE.md
+        /// Remove the registration (all agents, or those given via --agents)
         #[arg(long)]
         uninstall: bool,
+        /// Agents: comma list of claude,codex,gemini — or 'all' / 'auto' (detected).
+        /// Without this flag: interactive pick when a terminal is available, else auto.
+        #[arg(long)]
+        agents: Option<String>,
+    },
+    /// Update ams to the latest release (also runs automatically once a day)
+    Update {
+        /// Print nothing when already up to date; fail silently
+        #[arg(long)]
+        quiet: bool,
     },
     /// Token savings so far: per-command output size vs covered source size
     Gain,
@@ -93,6 +104,17 @@ enum Cmd {
         target: String,
         doc: String,
     },
+}
+
+/// Nearest ancestor containing .git (dir, or file for worktrees/submodules).
+fn git_root(start: &std::path::Path) -> Option<PathBuf> {
+    let mut cur = start;
+    loop {
+        if cur.join(".git").exists() {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
 }
 
 fn main() {
@@ -110,9 +132,20 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Cmd::Init { show, uninstall } = &cli.cmd {
-        return init::run(*show, *uninstall);
+    if let Cmd::Init {
+        show,
+        uninstall,
+        agents,
+    } = &cli.cmd
+    {
+        return init::run(*show, *uninstall, agents.clone());
     }
+
+    if let Cmd::Update { quiet } = &cli.cmd {
+        return update::run(*quiet);
+    }
+    // Any other invocation: kick off the once-a-day background update check.
+    update::maybe_background_check();
 
     if let Cmd::Build { path, force } = &cli.cmd {
         let root = path.clone().unwrap_or(std::env::current_dir()?);
@@ -142,11 +175,26 @@ fn run() -> Result<()> {
     }
 
     // Every query self-heals: cheap stat-walk, reparse only what changed.
-    let mut idx = Index::open_existing(&std::env::current_dir()?)?;
+    // No index yet -> build it ourselves when we can see a project boundary
+    // (a .git upward); agents shouldn't have to remember `ams build`.
+    let cwd = std::env::current_dir()?;
+    let mut idx = match Index::open_existing(&cwd) {
+        Ok(idx) => idx,
+        Err(e) => {
+            let no_auto = std::env::var("AMS_NO_AUTO_BUILD").ok().as_deref() == Some("1");
+            match git_root(&cwd).filter(|_| !no_auto) {
+                Some(root) => {
+                    eprintln!("ams: no index — building one at {} (git root)", root.display());
+                    Index::create(&root)?
+                }
+                None => return Err(e),
+            }
+        }
+    };
     idx.sync()?;
 
     match cli.cmd {
-        Cmd::Build { .. } | Cmd::Init { .. } => unreachable!(),
+        Cmd::Build { .. } | Cmd::Init { .. } | Cmd::Update { .. } => unreachable!(),
         Cmd::Describe { paths, exported } => {
             if paths.is_empty() {
                 return Err(anyhow!("usage: ams describe <file|dir>..."));

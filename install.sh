@@ -1,11 +1,13 @@
 #!/bin/sh
 # AMS installer: downloads the latest release binary for this platform and
-# registers the agent workflow in ~/.claude (via `ams init`).
+# registers the agent workflow (via `ams init`: interactive agent pick when a
+# terminal is available — Claude Code / Codex / Gemini — else auto-detect).
 #   curl -fsSL https://raw.githubusercontent.com/StMalina/ams/main/install.sh | sh
 # Options via env:
 #   AMS_INSTALL_DIR      target directory (default: ~/.local/bin)
-#   AMS_VERSION          tag to install, e.g. v0.5.0 (default: latest)
-#   AMS_CLAUDE_MD=0      skip `ams init` (do not touch ~/.claude/CLAUDE.md)
+#   AMS_VERSION          tag to install, e.g. v0.6.0 (default: latest)
+#   AMS_CLAUDE_MD=0      skip `ams init` (register manually later)
+#   AMS_AGENTS           non-interactive pick: e.g. claude,codex | all | auto
 #   AMS_SKIP_CHECKSUM=1  install even when no .sha256 is published (at your own risk)
 set -eu
 
@@ -82,22 +84,24 @@ case ":$PATH:" in
     *) echo "note: $INSTALL_DIR is not in PATH — add: export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 
-# --- register the workflow in the user's global CLAUDE.md (default: on) -----
-# `ams init` is idempotent: slim ~/.claude/AMS.md + one @AMS.md import line,
-# backup + atomic writes. Opt out with AMS_CLAUDE_MD=0; undo with
-# `ams init --uninstall`.
+# --- register the workflow with the user's coding agents (default: on) ------
+# `ams init` is idempotent (backup + atomic writes, undo: ams init --uninstall).
+# Interactive pick over /dev/tty when a terminal is attached; otherwise it
+# registers for the agents it detects (~/.claude, ~/.codex, ~/.gemini).
 if [ "${AMS_CLAUDE_MD:-1}" = "0" ]; then
-    echo "CLAUDE.md registration skipped (AMS_CLAUDE_MD=0); run '$INSTALL_DIR/ams init' later to enable"
+    echo "registration skipped (AMS_CLAUDE_MD=0); run '$INSTALL_DIR/ams init' later to enable"
+elif [ -n "${AMS_AGENTS:-}" ]; then
+    "$INSTALL_DIR/ams" init --agents "$AMS_AGENTS" || echo "warning: 'ams init' failed — run it manually" >&2
 else
     "$INSTALL_DIR/ams" init || echo "warning: 'ams init' failed — run it manually" >&2
 fi
 
 cat <<'EOF'
 
-Next steps:
-  1. Index a project:        cd <project> && ams build
-  2. Claude Code plugin (skill + hooks that make agents actually use ams):
-       /plugin marketplace add StMalina/ams
-       /plugin install ams@ams
-  3. Other agents (Codex, ...): see AGENTS.md.template in the repo.
+Done. Indexes build themselves on first use (or at session start with the
+plugin); ams checks for updates once a day. Optional next steps:
+  - Claude Code plugin (guards + skill that make agents actually use ams):
+      /plugin marketplace add StMalina/ams
+      /plugin install ams@ams
+  - Per-project instructions for other agents: AGENTS.md.template in the repo.
 EOF
