@@ -62,16 +62,25 @@ curl -fsSL https://raw.githubusercontent.com/StMalina/ams/main/install.sh | sh
 ```
 
 The installer verifies the SHA-256 checksum, then runs `ams init`, which
-registers the agent workflow globally: it writes a slim `~/.claude/AMS.md`
-and adds a single `@AMS.md` import line to `~/.claude/CLAUDE.md` (backup +
-atomic write, idempotent; see [Integration](#integration)).
+registers the agent workflow globally. With a terminal attached it asks
+which agents to register (Claude Code / Codex CLI / Gemini CLI, detected
+ones pre-selected); piped without a tty it registers for the detected ones.
+Claude Code gets a slim `~/.claude/AMS.md` plus one `@AMS.md` import line
+in `~/.claude/CLAUDE.md`; Codex and Gemini get a marker-guarded block in
+`~/.codex/AGENTS.md` / `~/.gemini/GEMINI.md`. All writes are backup +
+atomic and idempotent (see [Integration](#integration)).
+
+After that everything is hands-off: indexes build themselves on first use
+(any `ams` query in a git repo without `.ams/index.db` builds it at the git
+root; the plugin also builds in the background at session start), and ams
+checks for a new release once a day and updates itself in the background
+(`ams update` runs it manually; `AMS_NO_SELF_UPDATE=1` disables).
 
 Env options: `AMS_INSTALL_DIR` (default `~/.local/bin`), `AMS_VERSION` (tag,
-default latest), `AMS_CLAUDE_MD=0` — skip the `ams init` registration,
-`AMS_SKIP_CHECKSUM=1` — allow installing a release without a published
-checksum. Undo the registration anytime with `ams init --uninstall`; check
-it with `ams init --show`. The installer prints the plugin-install commands
-as next steps either way.
+default latest), `AMS_CLAUDE_MD=0` — skip registration, `AMS_AGENTS` —
+non-interactive pick (`claude,codex`, `all`, `auto`), `AMS_SKIP_CHECKSUM=1`
+— allow installing a release without a published checksum. Undo anytime
+with `ams init --uninstall`; check with `ams init --show`.
 
 Windows: download the `.zip` from
 [Releases](https://github.com/StMalina/ams/releases). From source:
@@ -87,11 +96,14 @@ ams --version
 
 ```bash
 cd /path/to/your/project
-ams build                       # creates .ams/index.db
 ams describe src/auth.ts        # signatures instead of full source
 ams find validateToken          # where is it defined
 ams refs validateToken          # who calls it
 ```
+
+No `.ams/index.db` yet? The first query builds it automatically at the git
+root (opt out with `AMS_NO_AUTO_BUILD=1`); `ams build` still works for
+explicit control and non-git directories.
 
 ## Commands
 
@@ -106,6 +118,8 @@ ams refs validateToken          # who calls it
 | `ams related <file>` | manually reading imports | deps + reverse deps (used-by) |
 | `ams annotate <file>:<Symbol.path> "doc"` | — | attach an LLM note to a symbol |
 | `ams gain` | — | accumulated token savings: output printed vs source covered |
+| `ams init` | manual CLAUDE.md editing | register the workflow with Claude Code / Codex / Gemini; `--show`, `--uninstall`, `--agents` |
+| `ams update` | re-running the installer | self-update to the latest release (also runs automatically once a day) |
 
 Flags: `--kind fn|method|class|struct|enum|trait|interface|const|type|mod`
 and `--exported` (on `describe`/`find`), global `--json` for machine-readable
@@ -261,16 +275,24 @@ guard converts the habitual miss into signatures at exactly the moment of
 use, at the cost of one blocked tool call. The `ams` binary itself is not
 bundled in the plugin (it's platform-specific) — see [Install](#install).
 
-**Global CLAUDE.md** — the strongest passive lever is making the workflow
-part of the agent's standing instructions; in our blind tests it is the one
-mechanism that reliably changes agent behavior. `ams init` sets it up:
-writes `~/.claude/AMS.md` (the full workflow, owned and refreshed by ams)
-and adds one `@AMS.md` import line to `~/.claude/CLAUDE.md`. Idempotent,
-backup + atomic writes, migrates the legacy inline `<!-- ams:start -->`
-block if present. `ams init --show` reports status; `ams init --uninstall`
-removes both. The installer runs it by default.
+**Global instructions** — the strongest passive lever is making the
+workflow part of the agent's standing instructions; in our blind tests it
+is the one mechanism that reliably changes agent behavior. `ams init` sets
+it up per agent:
 
-**Other agents (Codex, Gemini CLI, ...)** — copy the workflow from
+- **Claude Code** — writes `~/.claude/AMS.md` (the full workflow, owned and
+  refreshed by ams) and adds one `@AMS.md` import line to
+  `~/.claude/CLAUDE.md`; migrates the legacy inline `<!-- ams:start -->`
+  block if present.
+- **Codex CLI / Gemini CLI** — upserts a marker-guarded block into
+  `~/.codex/AGENTS.md` / `~/.gemini/GEMINI.md`.
+
+Selection: `--agents claude,codex,gemini`, `--agents all`, `--agents auto`
+(detected config dirs), or interactive when run in a terminal. Idempotent,
+backup + atomic writes. `ams init --show` reports status; `ams init
+--uninstall` removes everything. The installer runs it by default.
+
+**Per-project for other agents** — copy the workflow from
 `AGENTS.md.template` into your project's `AGENTS.md`.
 
 ## Supported languages
