@@ -20,13 +20,20 @@ EOF
     exit 0
 fi
 
+if [ "${AMS_NO_AUTO_BUILD:-0}" = "1" ]; then
+    exit 0
+fi
+
 if find "$PWD" -maxdepth 4 \
     \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \
        -o -name '*.rs' -o -name '*.py' -o -name '*.go' -o -name '*.php' \
        -o -name '*.java' -o -name '*.kt' -o -name '*.cs' -o -name '*.rb' \) \
     -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/target/*' \
     -print -quit 2>/dev/null | grep -q .; then
-    echo "ams is installed but this project has no .ams/index.db yet — run 'ams build' to enable fast code navigation."
+    # Code project without an index: build it in the background so the first
+    # ams query (or guard) already has data. Never blocks session start.
+    (cd "$PWD" && nohup ams build >/dev/null 2>&1 &)
+    echo "ams: building the code index in the background (.ams/index.db). Use ams describe/find/tree/refs for navigation once ready — queries self-heal."
 fi
 
 exit 0
