@@ -1,4 +1,5 @@
 mod format;
+mod init;
 
 use ams_core::model::SymbolKind;
 use ams_core::Index;
@@ -75,6 +76,15 @@ enum Cmd {
     Related {
         file: String,
     },
+    /// Register the AMS workflow in Claude Code (~/.claude/AMS.md + @AMS.md import)
+    Init {
+        /// Print current registration status without changing anything
+        #[arg(long)]
+        show: bool,
+        /// Remove the AMS.md file and the @AMS.md import from CLAUDE.md
+        #[arg(long)]
+        uninstall: bool,
+    },
     /// Token savings so far: per-command output size vs covered source size
     Gain,
     /// Attach a doc note to a symbol: ams annotate src/auth.ts:AuthService.login "..."
@@ -99,6 +109,10 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Cmd::Init { show, uninstall } = &cli.cmd {
+        return init::run(*show, *uninstall);
+    }
 
     if let Cmd::Build { path, force } = &cli.cmd {
         let root = path.clone().unwrap_or(std::env::current_dir()?);
@@ -132,7 +146,7 @@ fn run() -> Result<()> {
     idx.sync()?;
 
     match cli.cmd {
-        Cmd::Build { .. } => unreachable!(),
+        Cmd::Build { .. } | Cmd::Init { .. } => unreachable!(),
         Cmd::Describe { paths, exported } => {
             if paths.is_empty() {
                 return Err(anyhow!("usage: ams describe <file|dir>..."));
