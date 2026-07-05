@@ -13,6 +13,9 @@ pub enum SymbolKind {
     Const,
     TypeAlias,
     Module,
+    /// A test-framework block: `describe(...)`, `it(...)`, `test(...)`, etc.
+    /// Named by its string title, not a declared identifier.
+    Test,
 }
 
 impl SymbolKind {
@@ -28,6 +31,7 @@ impl SymbolKind {
             SymbolKind::Const => "const",
             SymbolKind::TypeAlias => "type",
             SymbolKind::Module => "mod",
+            SymbolKind::Test => "test",
         }
     }
 
@@ -43,6 +47,7 @@ impl SymbolKind {
             "const" => SymbolKind::Const,
             "type" => SymbolKind::TypeAlias,
             "mod" | "module" => SymbolKind::Module,
+            "test" => SymbolKind::Test,
             _ => return None,
         })
     }
@@ -172,4 +177,17 @@ pub struct GainRow {
     pub calls: i64,
     pub output_bytes: i64,
     pub source_bytes: i64,
+}
+
+/// One aggregated coverage-miss row for `ams miss`: a place where ams failed
+/// to serve what an agent wanted. `kind` is `symbol` (agent grepped an
+/// identifier ams didn't index, but which exists in code text) or `parse` (a
+/// non-trivial file ams indexed to zero symbols).
+#[derive(Debug, Serialize)]
+pub struct MissRow {
+    pub kind: String,
+    pub token: String,
+    pub count: i64,
+    pub detail: Option<String>,
+    pub last_ts: i64,
 }

@@ -100,6 +100,14 @@ enum Cmd {
     },
     /// Token savings so far: per-command output size vs covered source size
     Gain,
+    /// Coverage misses: where ams failed to serve what an agent wanted —
+    /// symbols it greps for but ams didn't index, and files parsed to nothing
+    Miss {
+        /// Record a miss for this identifier (used by the shell guards),
+        /// instead of showing the log
+        #[arg(long)]
+        record: Option<String>,
+    },
     /// Attach a doc note to a symbol: ams annotate src/auth.ts:AuthService.login "..."
     Annotate {
         /// Target as <file>:<Symbol.path>
@@ -146,6 +154,24 @@ fn run() -> Result<()> {
     if let Cmd::Update { quiet } = &cli.cmd {
         return update::run(*quiet);
     }
+
+    // Coverage-miss log lives in the index but needs no sync — recording is
+    // called from shell guards on a hot path, so keep it cheap and fail-soft
+    // (a missing index just means nothing to record or show).
+    if let Cmd::Miss { record } = &cli.cmd {
+        let Ok(idx) = Index::open_existing(&std::env::current_dir()?) else {
+            return Ok(());
+        };
+        if let Some(token) = record {
+            let _ = idx.log_miss("symbol", token, None);
+        } else if cli.json {
+            println!("{}", serde_json::to_string_pretty(&idx.misses()?)?);
+        } else {
+            print!("{}", format::misses(&idx.misses()?));
+        }
+        return Ok(());
+    }
+
     // Any other invocation: kick off the once-a-day background update check.
     update::maybe_background_check();
 
@@ -196,7 +222,9 @@ fn run() -> Result<()> {
     idx.sync()?;
 
     match cli.cmd {
-        Cmd::Build { .. } | Cmd::Init { .. } | Cmd::Update { .. } => unreachable!(),
+        Cmd::Build { .. } | Cmd::Init { .. } | Cmd::Update { .. } | Cmd::Miss { .. } => {
+            unreachable!()
+        }
         Cmd::Describe { paths, exported } => {
             if paths.is_empty() {
                 return Err(anyhow!("usage: ams describe <file|dir>..."));

@@ -315,6 +315,41 @@ pub fn gain(rows: &[GainRow]) -> String {
     out
 }
 
+pub fn misses(rows: &[MissRow]) -> String {
+    if rows.is_empty() {
+        return "no coverage misses recorded yet — no agent has fallen back to \
+                grep for an unindexed symbol, and no file parsed to zero \
+                symbols\n"
+            .to_string();
+    }
+    let mut out =
+        String::from("coverage misses — where ams didn't serve what an agent wanted:\n");
+    for r in rows {
+        match r.kind.as_str() {
+            // symbol: agent grepped this identifier, `ams find` was empty, yet
+            // it exists in code text — a real indexing gap.
+            "symbol" => out.push_str(&format!(
+                "  symbol  {:<32} {:>3}x  grep fell back; not indexed\n",
+                r.token, r.count
+            )),
+            // parse: a non-trivial file ams indexed with no symbols at all.
+            "parse" => out.push_str(&format!(
+                "  parse   {:<32} {:>3}x  {} — parsed to zero symbols\n",
+                r.token,
+                r.count,
+                r.detail.as_deref().unwrap_or(""),
+            )),
+            other => out.push_str(&format!("  {other}  {}  {}x\n", r.token, r.count)),
+        }
+    }
+    out.push_str(
+        "symbol = an identifier agents grep for that ams can't find but that \
+         lives in the code; parse = a file ams indexed structure-free. Both are \
+         gaps worth closing in the parser/resolver.\n",
+    );
+    out
+}
+
 pub fn related(info: &RelatedInfo) -> String {
     let mut out = format!("{}\n", info.path);
     if !info.internal_deps.is_empty() {

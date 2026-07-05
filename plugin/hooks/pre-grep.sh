@@ -55,7 +55,20 @@ marker="${TMPDIR:-/tmp}/.ams-grep-guard-${SID}-$(printf '%s' "$PAT" | cksum | tr
 out=$(cd "$root" && ams find "$PAT" 2>/dev/null) || exit 0
 # No indexed definitions -> probably a genuine text search; stay silent.
 case "$out" in
-    ''|no\ symbols*|no\ matches*) exit 0 ;;
+    ''|no\ symbols*|no\ matches*)
+        # Feedback signal A: an identifier-shaped Grep ams couldn't answer. If
+        # the token exists in the code text, it's a confirmed coverage miss —
+        # record once per token per session, then stay silent (let Grep run).
+        mmark="${TMPDIR:-/tmp}/.ams-miss-${SID}-$(printf '%s' "$PAT" | cksum | tr ' \t' '--')"
+        if [ ! -e "$mmark" ]; then
+            if (cd "$root" && { command -v rg >/dev/null 2>&1 && rg -qwF -- "$PAT" \
+                    || grep -rqwF -- "$PAT" .; }) 2>/dev/null; then
+                (cd "$root" && ams miss --record "$PAT" >/dev/null 2>&1)
+                touch "$mmark" 2>/dev/null
+            fi
+        fi
+        exit 0
+        ;;
 esac
 
 touch "$marker" 2>/dev/null

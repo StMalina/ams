@@ -176,8 +176,16 @@ fn collect_top(
                 });
             }
         }
-        // CommonJS: module.exports = {...} / exports.foo = ...
+        // Test-framework blocks: describe()/it()/test()/lab.test()... — call
+        // expressions with a string title, not declarations. Surfaced so
+        // `ams describe <test-file>` shows what each test checks.
         "expression_statement" => {
+            let before = out.symbols.len();
+            collect_test(node, src, &mut out.symbols);
+            if out.symbols.len() != before {
+                return;
+            }
+            // CommonJS: module.exports = {...} / exports.foo = ...
             let Some(expr) = node.named_child(0) else {
                 return;
             };
@@ -300,6 +308,110 @@ fn simple_symbol(node: Node, src: &str, kind: SymbolKind, exported: bool) -> Opt
         doc: preceding_doc(node, src),
         children: vec![],
     })
+}
+
+/// Test-runner block keywords across mocha / jest / vitest / node:test /
+/// @hapi/lab. Modifiers (`.only`, `.skip`, `.each`) and x/f prefixes included.
+fn is_test_word(w: &str) -> bool {
+    matches!(
+        w,
+        "describe" | "xdescribe" | "fdescribe" | "context" | "suite" | "experiment"
+            | "it" | "xit" | "fit" | "specify" | "xspecify"
+            | "test" | "xtest"
+    )
+}
+
+/// If `f` heads a test-framework call, returns `Some(requires_callback)`.
+/// `requires_callback` is true only for property-form heads (`lab.test`,
+/// `t.test`) where demanding a function argument rules out false positives
+/// like `regex.test("literal")`.
+fn test_head(f: Node, src: &str) -> Option<bool> {
+    match f.kind() {
+        "identifier" => is_test_word(node_text(src, f)).then_some(false),
+        "member_expression" => {
+            // `describe.only(...)`, `it.each(...)` — base keyword is the object.
+            if let Some(o) = f.child_by_field_name("object") {
+                if o.kind() == "identifier" && is_test_word(node_text(src, o)) {
+                    return Some(false);
+                }
+            }
+            // `lab.test(...)`, `t.test(...)` — base keyword is the property.
+            if let Some(p) = f.child_by_field_name("property") {
+                if is_test_word(node_text(src, p)) {
+                    return Some(true);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Emit a `Test` symbol for a `describe`/`it`/`test` statement, recursing into
+/// the callback body so nested cases nest as children. No-op for anything that
+/// is not a test-framework call with a string title.
+fn collect_test(node: Node, src: &str, out: &mut Vec<ParsedSymbol>) {
+    let call = match node.kind() {
+        "call_expression" => node,
+        "expression_statement" => match node.named_child(0) {
+            Some(c) if c.kind() == "call_expression" => c,
+            _ => return,
+        },
+        _ => return,
+    };
+    let Some(f) = call.child_by_field_name("function") else {
+        return;
+    };
+    let Some(requires_cb) = test_head(f, src) else {
+        return;
+    };
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let Some(title_node) = args.named_child(0) else {
+        return;
+    };
+    if !matches!(title_node.kind(), "string" | "template_string") {
+        return;
+    }
+    // Callback = the function-like argument (2nd for describe/it, may carry the
+    // nested cases). Its absence is fine for pending tests (`it('todo')`) but
+    // required for property-form heads to avoid `re.test("x")` false positives.
+    let mut cursor = args.walk();
+    let cb = args.named_children(&mut cursor).find(|n| {
+        matches!(
+            n.kind(),
+            "arrow_function" | "function_expression" | "function" | "generator_function"
+        )
+    });
+    if requires_cb && cb.is_none() {
+        return;
+    }
+    let title = unquote(node_text(src, title_node));
+    let head = node_text(src, f);
+    let mut children = Vec::new();
+    if let Some(cb) = cb {
+        if let Some(body) = cb.child_by_field_name("body") {
+            if body.kind() == "statement_block" {
+                let mut c2 = body.walk();
+                for stmt in body.named_children(&mut c2) {
+                    collect_test(stmt, src, &mut children);
+                }
+            }
+        }
+    }
+    let (start, end) = line_span(node);
+    out.push(ParsedSymbol {
+        name: title.clone(),
+        kind: SymbolKind::Test,
+        signature: super::collapse(&format!("{head} \"{title}\"")),
+        start_line: start,
+        end_line: end,
+        exported: false,
+        body_hash: body_hash(src, node),
+        doc: None,
+        children,
+    });
 }
 
 fn collect_refs(root: Node, src: &str, refs: &mut Vec<RefOccurrence>) {

@@ -124,6 +124,12 @@ impl Index {
                output_bytes INTEGER NOT NULL,
                source_bytes INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS misses(
+               ts INTEGER NOT NULL,
+               kind TEXT NOT NULL,
+               token TEXT NOT NULL,
+               detail TEXT
+             );
              CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts
                USING fts5(name, signature, doc, path);",
         )?;
@@ -163,9 +169,18 @@ impl Index {
 
     /// Bring the index in line with the filesystem. Cheap when nothing changed
     /// (stat-only walk); reparses only files whose mtime+size or hash differ.
+    ///
+    /// Two passes: small files first (committed before the second pass, so the
+    /// index is usable immediately and durable if interrupted), then large
+    /// non-minified files. Large files aren't dropped for being large — that's
+    /// exactly where reading the raw source is most expensive, so the index is
+    /// most valuable — they're only skipped when minified (no navigable spans)
+    /// or when they parse to zero symbols (generated blob, nothing to index).
     pub fn sync(&mut self) -> Result<SyncStats> {
         let mut stats = SyncStats::default();
         let mut seen: HashSet<String> = HashSet::new();
+        // Large non-minified files parsed in the second pass: (abs, rel, ext).
+        let mut deferred: Vec<(PathBuf, String, String, i64, i64)> = Vec::new();
 
         let known: HashMap<String, (i64, i64, String)> = self
             .conn
@@ -217,16 +232,29 @@ impl Index {
 
             if let Some((db_mtime, db_size, _)) = known.get(&rel) {
                 if *db_mtime == mtime && *db_size == size {
-                    continue; // fast path
+                    continue; // fast path — unchanged, never even read
                 }
+            }
+
+            // Pathological files (multi-MB generated data) would blow memory;
+            // skip outright and drop any stale index rows.
+            if size > HARD_CAP {
+                delete_file_rows(&tx, &rel)?;
+                continue;
+            }
+            // Large files go to the second pass without being read here.
+            if size > DEFER_SIZE {
+                deferred.push((path.to_path_buf(), rel, ext.to_string(), mtime, size));
+                continue;
             }
 
             let source = match std::fs::read_to_string(path) {
                 Ok(s) => s,
                 Err(_) => continue, // non-UTF8 or unreadable
             };
-            if is_generated(&source, size) {
-                continue; // minified bundles / huge generated files
+            if is_minified(&source) {
+                delete_file_rows(&tx, &rel)?; // one-line bundle: no nav value
+                continue;
             }
             let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
             if let Some((_, _, db_hash)) = known.get(&rel) {
@@ -258,6 +286,48 @@ impl Index {
             resolve_imports(&tx, &self.root)?;
         }
         tx.commit()?;
+
+        // Second pass: large files, parsed after the fast index is durable.
+        if !deferred.is_empty() {
+            let tx = self.conn.transaction()?;
+            let mut parsed_any = false;
+            for (path, rel, ext, mtime, size) in &deferred {
+                let source = match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if is_minified(&source) {
+                    delete_file_rows(&tx, rel)?;
+                    continue;
+                }
+                let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+                if let Some((_, _, db_hash)) = known.get(rel) {
+                    if *db_hash == hash {
+                        tx.execute(
+                            "UPDATE files SET mtime = ?1, size = ?2 WHERE path = ?3",
+                            params![mtime, size, rel],
+                        )?;
+                        continue;
+                    }
+                }
+                let parser = parser_for_ext(ext).unwrap();
+                let parsed = parser
+                    .parse(&source)
+                    .with_context(|| format!("parse failed: {rel}"))?;
+                // Store like any other file — including the empty file row when
+                // there are no symbols. That records mtime/size so the next sync
+                // takes the fast path instead of re-reading and re-parsing this
+                // large file every time, and surfaces it as a `parse` miss.
+                upsert_file(&tx, rel, ext, &parsed, &hash, *mtime, *size)?;
+                stats.parsed += 1;
+                parsed_any = true;
+            }
+            if parsed_any {
+                resolve_imports(&tx, &self.root)?;
+            }
+            tx.commit()?;
+        }
+
         Ok(stats)
     }
 
@@ -511,6 +581,42 @@ impl Index {
         Ok(())
     }
 
+    /// Record a coverage miss. `symbol` misses come from the shell guards when
+    /// an agent greps an identifier `ams find` can't answer; `parse` misses are
+    /// logged during indexing (see `upsert_file`). Fire-and-forget: callers in
+    /// hooks ignore the result.
+    pub fn log_miss(&self, kind: &str, token: &str, detail: Option<&str>) -> Result<()> {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO misses(ts, kind, token, detail) VALUES (?1, ?2, ?3, ?4)",
+            params![ts, kind, token, detail],
+        )?;
+        Ok(())
+    }
+
+    pub fn misses(&self) -> Result<Vec<MissRow>> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT kind, token, COUNT(*), MAX(detail), MAX(ts)
+                 FROM misses GROUP BY kind, token
+                 ORDER BY COUNT(*) DESC, MAX(ts) DESC",
+            )?
+            .query_map([], |r| {
+                Ok(MissRow {
+                    kind: r.get(0)?,
+                    token: r.get(1)?,
+                    count: r.get(2)?,
+                    detail: r.get(3)?,
+                    last_ts: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn gain(&self) -> Result<Vec<GainRow>> {
         Ok(self
             .conn
@@ -702,14 +808,8 @@ fn upsert_file(
     size: i64,
 ) -> Result<()> {
     // Full replace: cascade wipes symbols/imports/refs; annotations live in
-    // their own table keyed by path+symbol and survive. FTS rows are not
-    // FK-aware — clear them explicitly before the cascade removes symbols.
-    tx.execute(
-        "DELETE FROM symbols_fts WHERE rowid IN
-           (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = ?1)",
-        params![rel],
-    )?;
-    tx.execute("DELETE FROM files WHERE path = ?1", params![rel])?;
+    // their own table keyed by path+symbol and survive.
+    delete_file_rows(tx, rel)?;
     tx.execute(
         "INSERT INTO files(path, lang, loc, hash, mtime, size) VALUES (?1,?2,?3,?4,?5,?6)",
         params![rel, lang, parsed.loc, hash, mtime, size],
@@ -719,6 +819,29 @@ fn upsert_file(
     for sym in &parsed.symbols {
         insert_symbol(tx, file_id, None, sym, rel)?;
     }
+
+    // Parser under-extraction (feedback signal B): a non-trivial file that ams
+    // parsed to zero symbols yet clearly holds code (imports or call refs) —
+    // the class of gap that hid test titles. Self-cleaning: re-parsing a file
+    // that now yields symbols drops its stale miss on the next upsert.
+    tx.execute(
+        "DELETE FROM misses WHERE kind = 'parse' AND token = ?1",
+        params![rel],
+    )?;
+    if parsed.symbols.is_empty()
+        && parsed.loc >= 30
+        && (!parsed.imports.is_empty() || !parsed.refs.is_empty())
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        tx.execute(
+            "INSERT INTO misses(ts, kind, token, detail) VALUES (?1, 'parse', ?2, ?3)",
+            params![ts, rel, format!("{lang} {}loc", parsed.loc)],
+        )?;
+    }
+
     let mut imp = tx.prepare_cached("INSERT INTO imports(file_id, target) VALUES (?1, ?2)")?;
     for target in &parsed.imports {
         imp.execute(params![file_id, target])?;
@@ -1054,12 +1177,30 @@ fn resolve_rust(files: &HashMap<String, i64>, target: &str) -> Option<i64> {
     candidates.iter().find_map(|c| files.get(c).copied())
 }
 
-/// Minified or generated code: no navigation value, expensive to parse.
-fn is_generated(source: &str, size: i64) -> bool {
-    if size > 2_000_000 {
-        return true;
-    }
-    source.lines().take(20).any(|l| l.len() > 2500)
+/// Parse large files (over this) in sync()'s deferred second pass, after the
+/// fast index of small files is already committed.
+const DEFER_SIZE: i64 = 512 * 1024;
+/// Above this, skip entirely — parsing would risk blowing memory for no
+/// navigable payoff (multi-MB generated data files).
+const HARD_CAP: i64 = 24 * 1024 * 1024;
+
+/// Minified code: one giant line, so tree-sitter spans carry no navigation
+/// value. Distinct from "large" — a big file with normal lines is real code
+/// and gets indexed (deferred), only genuinely minified bundles are dropped.
+fn is_minified(source: &str) -> bool {
+    source.lines().take(50).any(|l| l.len() > 2500)
+}
+
+/// Remove a file's index rows (symbols cascade; FTS is not FK-aware so clear
+/// it first). No-op if the file was never indexed.
+fn delete_file_rows(tx: &rusqlite::Transaction, rel: &str) -> Result<()> {
+    tx.execute(
+        "DELETE FROM symbols_fts WHERE rowid IN
+           (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = ?1)",
+        params![rel],
+    )?;
+    tx.execute("DELETE FROM files WHERE path = ?1", params![rel])?;
+    Ok(())
 }
 
 /// Lexical path normalization (resolves `.` and `..` without touching the fs).

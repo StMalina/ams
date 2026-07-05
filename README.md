@@ -268,7 +268,12 @@ Read/Grep, and four hooks (`plugin/hooks/`):
   grep/rg invocations with an identifier-looking pattern in an indexed
   project trigger; string/log/config greps and every other command are
   untouched, and any parsing doubt fails open. Opt out with
-  `AMS_NO_BASH_GUARD=1`.
+  `AMS_NO_BASH_GUARD=1`. The same hook also **auto-approves read-only `ams`
+  queries** (`describe`, `tree`, `find`, `refs`, `search`, `related`, `gain`,
+  including `rtk`/`sudo`-wrapped ones) so plan mode — which otherwise denies
+  every shell call — never blocks the workflow; anything chaining a second
+  command (`ams find x && …`) or writing (`ams build`, `ams init`) is left to
+  the normal permission flow.
 
 The guard exists because passive hints lose to habit: agents trained on
 grep-and-read keep grepping and reading even with the skill available. The

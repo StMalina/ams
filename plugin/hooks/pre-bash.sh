@@ -26,7 +26,40 @@ try:
 except Exception:
     sys.exit(0)
 cmd = str((d.get("tool_input") or {}).get("command") or "")
-if not cmd or cmd.startswith("ams "):
+if not cmd:
+    sys.exit(0)
+
+# Read-only ams queries carry no side effects; auto-approve them so plan mode
+# (which otherwise denies every Bash call) never blocks the ams workflow.
+AMS_READONLY = {"describe", "tree", "find", "refs", "search", "related", "gain"}
+
+def unwrap(tokens):
+    """Strip env-var prefixes and command wrappers (rtk/sudo/env/...)."""
+    WRAPPERS = {"rtk", "command", "sudo", "env", "nice", "nohup"}
+    while tokens:
+        while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+            tokens.pop(0)
+        if tokens and tokens[0].rsplit("/", 1)[-1] in WRAPPERS:
+            w = tokens.pop(0).rsplit("/", 1)[-1]
+            if w == "rtk" and tokens and tokens[0] == "proxy":
+                tokens.pop(0)
+            continue
+        break
+    return tokens
+
+# Only a lone ams query (no operators chaining a second command) is allowed —
+# `ams find x && rm -rf y` must not slip through.
+segments = [s for s in re.split(r"&&|\|\||[;|]", cmd) if s.strip()]
+if len(segments) == 1:
+    try:
+        toks = unwrap(shlex.split(segments[0].strip()))
+    except ValueError:
+        toks = []
+    if len(toks) >= 2 and toks[0].rsplit("/", 1)[-1] == "ams" and toks[1] in AMS_READONLY:
+        print("ALLOW=1")
+        sys.exit(0)
+
+if cmd.startswith("ams "):
     sys.exit(0)
 
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}\Z")
@@ -76,16 +109,7 @@ for seg in re.split(r"&&|\|\||[;|]", cmd):
         continue
     # Unwrap env-var prefixes and command wrappers: `FOO=1 rtk grep X`,
     # `sudo grep X`, `rtk proxy rg X` must still hit the guard.
-    WRAPPERS = {"rtk", "command", "sudo", "env", "nice", "nohup"}
-    while tokens:
-        while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
-            tokens.pop(0)
-        if tokens and tokens[0].rsplit("/", 1)[-1] in WRAPPERS:
-            w = tokens.pop(0).rsplit("/", 1)[-1]
-            if w == "rtk" and tokens and tokens[0] == "proxy":
-                tokens.pop(0)
-            continue
-        break
+    tokens = unwrap(tokens)
     if not tokens or tokens[0] == "ams":
         continue
     p = pattern_of(tokens)
@@ -99,6 +123,12 @@ print("PAT=%s" % shlex.quote(pat))
 print("CWD=%s" % shlex.quote(str(d.get("cwd") or "")))
 print("SID=%s" % shlex.quote(str(d.get("session_id") or "nosession")))
 ' 2>/dev/null)" 2>/dev/null || exit 0
+
+# Auto-approve a read-only ams query (unblocks plan mode).
+if [ "${ALLOW:-}" = "1" ]; then
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"ams read-only query — no side effects"}}'
+    exit 0
+fi
 
 [ -n "${PAT:-}" ] || exit 0
 [ -n "${CWD:-}" ] || exit 0
@@ -119,7 +149,21 @@ marker="${TMPDIR:-/tmp}/.ams-grep-guard-${SID}-$(printf '%s' "$PAT" | cksum | tr
 
 out=$(cd "$root" && ams find "$PAT" 2>/dev/null) || exit 0
 case "$out" in
-    ''|no\ symbols*|no\ matches*) exit 0 ;;
+    ''|no\ symbols*|no\ matches*)
+        # Feedback signal A: ams has no symbol for an identifier-shaped grep. If
+        # the token still exists in the code text, this is a confirmed coverage
+        # miss (symbol present, ams didn't index it) — record it once per token
+        # per session, then let the grep run.
+        mmark="${TMPDIR:-/tmp}/.ams-miss-${SID}-$(printf '%s' "$PAT" | cksum | tr ' \t' '--')"
+        if [ ! -e "$mmark" ]; then
+            if (cd "$root" && { command -v rg >/dev/null 2>&1 && rg -qwF -- "$PAT" \
+                    || grep -rqwF -- "$PAT" .; }) 2>/dev/null; then
+                (cd "$root" && ams miss --record "$PAT" >/dev/null 2>&1)
+                touch "$mmark" 2>/dev/null
+            fi
+        fi
+        exit 0
+        ;;
 esac
 
 touch "$marker" 2>/dev/null
