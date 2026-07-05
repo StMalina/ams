@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "ams-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ams-core",
  "anyhow",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "ams-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "blake3",

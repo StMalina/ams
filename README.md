@@ -61,11 +61,17 @@ Prebuilt binary (Linux x64/arm64, macOS x64/arm64 — static musl on Linux):
 curl -fsSL https://raw.githubusercontent.com/StMalina/ams/main/install.sh | sh
 ```
 
+The installer verifies the SHA-256 checksum, then runs `ams init`, which
+registers the agent workflow globally: it writes a slim `~/.claude/AMS.md`
+and adds a single `@AMS.md` import line to `~/.claude/CLAUDE.md` (backup +
+atomic write, idempotent; see [Integration](#integration)).
+
 Env options: `AMS_INSTALL_DIR` (default `~/.local/bin`), `AMS_VERSION` (tag,
-default latest), `AMS_CLAUDE_MD=1` — also append the agent workflow snippet
-to `~/.claude/CLAUDE.md` (idempotent, marker-guarded; see
-[Integration](#integration)). The installer prints the plugin-install
-commands as next steps either way.
+default latest), `AMS_CLAUDE_MD=0` — skip the `ams init` registration,
+`AMS_SKIP_CHECKSUM=1` — allow installing a release without a published
+checksum. Undo the registration anytime with `ams init --uninstall`; check
+it with `ams init --show`. The installer prints the plugin-install commands
+as next steps either way.
 
 Windows: download the `.zip` from
 [Releases](https://github.com/StMalina/ams/releases). From source:
@@ -225,7 +231,7 @@ marketplace):
 (`plugin/.claude-plugin/plugin.json`), a skill
 (`plugin/skills/ams/SKILL.md`) that teaches the agent the
 describe/find/refs/tree/related/annotate workflow in place of raw
-Read/Grep, and two hooks (`plugin/hooks/`):
+Read/Grep, and four hooks (`plugin/hooks/`):
 
 - `SessionStart` — injects the workflow into the session when an index is
   present, or suggests `ams build` when one is missing.
@@ -236,6 +242,18 @@ Read/Grep, and two hooks (`plugin/hooks/`):
   same `Read` passes (so `Edit` chains keep working); targeted reads, small
   files, and unindexed projects are never touched. Opt out with
   `AMS_NO_READ_GUARD=1`.
+- `PreToolUse` on `Grep` — the **grep guard**: a Grep whose pattern is a
+  bare identifier (camelCase / snake_case) that exists in the index is
+  intercepted once and answered with `ams find` output — exact definitions
+  instead of matching lines. Regex patterns, plain words, and unknown
+  symbols pass untouched; repeating the same Grep passes. Opt out with
+  `AMS_NO_GREP_GUARD=1`.
+- `PreToolUse` on `Bash` — the same guard for shell searches (`grep -rn
+  foo`, `rg foo`), which bypass the Read/Grep tools entirely. Only plain
+  grep/rg invocations with an identifier-looking pattern in an indexed
+  project trigger; string/log/config greps and every other command are
+  untouched, and any parsing doubt fails open. Opt out with
+  `AMS_NO_BASH_GUARD=1`.
 
 The guard exists because passive hints lose to habit: agents trained on
 grep-and-read keep grepping and reading even with the skill available. The
@@ -244,17 +262,13 @@ use, at the cost of one blocked tool call. The `ams` binary itself is not
 bundled in the plugin (it's platform-specific) — see [Install](#install).
 
 **Global CLAUDE.md** — the strongest passive lever is making the workflow
-part of the agent's standing instructions. Add to `~/.claude/CLAUDE.md`
-(applies to every project, gated on the index existing):
-
-```markdown
-## Code navigation (projects with .ams/index.db)
-Before Read on an unfamiliar code file: `ams describe <file>` — signatures
-with @start-end spans, 10–40× cheaper; then Read only the span.
-Symbol definition: `ams find <name>`. Directory: `ams tree <dir>`.
-Before changing an exported API: `ams refs <name>` + `ams related <file>`.
-Grep only for strings/comments/config. No index yet → `ams build` once.
-```
+part of the agent's standing instructions; in our blind tests it is the one
+mechanism that reliably changes agent behavior. `ams init` sets it up:
+writes `~/.claude/AMS.md` (the full workflow, owned and refreshed by ams)
+and adds one `@AMS.md` import line to `~/.claude/CLAUDE.md`. Idempotent,
+backup + atomic writes, migrates the legacy inline `<!-- ams:start -->`
+block if present. `ams init --show` reports status; `ams init --uninstall`
+removes both. The installer runs it by default.
 
 **Other agents (Codex, Gemini CLI, ...)** — copy the workflow from
 `AGENTS.md.template` into your project's `AGENTS.md`.
