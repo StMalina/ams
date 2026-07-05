@@ -100,10 +100,8 @@ fi
 cat <<'EOF'
 
 Done. Indexes build themselves on first use (or at session start with the
-plugin); ams checks for updates once a day. Optional next steps:
-  - Claude Code plugin (guards + skill that make agents actually use ams):
-      /plugin marketplace add StMalina/ams
-      /plugin install ams@ams
-  - Agents without a global instructions file (Cursor, Hermes): copy
-    AGENTS.md.template from the repo into the project's AGENTS.md.
+plugin), ams checks for updates once a day, and picking Claude Code above
+also installed its plugin (guards + skill) when the claude CLI was found.
+Agents without a global instructions file (Cursor, Hermes): copy
+AGENTS.md.template from the repo into the project's AGENTS.md.
 EOF

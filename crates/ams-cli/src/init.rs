@@ -15,6 +15,10 @@
 //!
 //! Every edit of a shared file is backup (`.bak`) + temp-file + rename; owned
 //! files are simply written/removed. Idempotent: a second run changes nothing.
+//!
+//! Picking Claude Code also installs the Claude Code plugin (guards + skill)
+//! through the `claude plugin` CLI when it is on PATH — fail-soft, opt out
+//! with AMS_NO_PLUGIN=1.
 
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -649,6 +653,45 @@ fn line_select(detected: &[Agent]) -> Option<Vec<Agent>> {
     }
 }
 
+/// Claude Code plugin (guards + skill) — managed through the official
+/// `claude plugin` CLI so updates keep flowing through the marketplace.
+/// Both commands are idempotent; everything here is fail-soft: no claude
+/// binary or a failed install degrades to a printed hint, never an error.
+fn claude_plugin(install: bool) {
+    if std::env::var("AMS_NO_PLUGIN").ok().as_deref() == Some("1") {
+        return;
+    }
+    let run = |args: &[&str]| {
+        std::process::Command::new("claude")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+    };
+    if install {
+        let hint = || {
+            println!(
+                "note: Claude Code plugin (guards + skill) not installed — from Claude Code run:\n      /plugin marketplace add StMalina/ams\n      /plugin install ams@ams"
+            );
+        };
+        // A failed add is fine (e.g. a marketplace named `ams` already
+        // exists, pointing elsewhere) — install below settles it.
+        match run(&["plugin", "marketplace", "add", "StMalina/ams"]) {
+            Err(_) => hint(), // no claude CLI on PATH
+            Ok(_) => match run(&["plugin", "install", "ams@ams"]) {
+                Ok(out) if out.status.success() => {
+                    println!("[ok] Claude Code plugin installed (guards + skill)")
+                }
+                _ => hint(),
+            },
+        }
+    } else if let Ok(out) = run(&["plugin", "uninstall", "ams@ams"]) {
+        if out.status.success() {
+            let _ = run(&["plugin", "marketplace", "remove", "ams"]);
+            println!("[ok] Claude Code plugin uninstalled");
+        }
+    }
+}
+
 pub fn run(show: bool, uninstall: bool, agents: Option<String>) -> Result<()> {
     if show {
         for a in ALL_AGENTS {
@@ -661,8 +704,11 @@ pub fn run(show: bool, uninstall: bool, agents: Option<String>) -> Result<()> {
             Some(spec) => parse_agents(spec)?,
             None => ALL_AGENTS.to_vec(),
         };
-        for a in targets {
-            uninstall_agent(a)?;
+        for a in &targets {
+            uninstall_agent(*a)?;
+        }
+        if targets.contains(&Agent::Claude) {
+            claude_plugin(false);
         }
         return Ok(());
     }
@@ -701,6 +747,11 @@ pub fn run(show: bool, uninstall: bool, agents: Option<String>) -> Result<()> {
             Mech::Block => install_block(*a)?,
             Mech::OwnFile => install_own_file(*a)?,
         }
+    }
+    // Picking Claude Code means the whole Claude Code setup — the plugin's
+    // guards and skill are what make agents actually use ams.
+    if targets.contains(&Agent::Claude) {
+        claude_plugin(true);
     }
     println!(
         "\nDone. Undo anytime: ams init --uninstall; status: ams init --show"

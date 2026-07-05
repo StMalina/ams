@@ -232,8 +232,10 @@ When the annotated symbol's body changes, the note is kept but shown with a
 
 ## Integration
 
-**Claude Code plugin** — install from this repo (it doubles as a plugin
-marketplace):
+**Claude Code plugin** — `ams init` installs it automatically when you pick
+Claude Code and the `claude` CLI is on PATH (opt out with `AMS_NO_PLUGIN=1`;
+removed again by `ams init --uninstall`). Manual install from this repo (it
+doubles as a plugin marketplace):
 
 ```
 /plugin marketplace add StMalina/ams
