@@ -4,6 +4,8 @@
 # Options via env:
 #   AMS_INSTALL_DIR  target directory (default: ~/.local/bin)
 #   AMS_VERSION      tag to install, e.g. v0.3.0 (default: latest)
+#   AMS_CLAUDE_MD=1  append the agent workflow snippet to ~/.claude/CLAUDE.md
+#                    (idempotent: guarded by <!-- ams --> markers)
 set -eu
 
 REPO="StMalina/ams"
@@ -46,3 +48,38 @@ case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *) echo "note: $INSTALL_DIR is not in PATH — add: export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
+
+# --- optional: register the workflow in the user's global CLAUDE.md ---------
+# `curl | sh` has no tty, so no interactive prompt: opt in via AMS_CLAUDE_MD=1.
+if [ "${AMS_CLAUDE_MD:-0}" = "1" ]; then
+    claude_md="$HOME/.claude/CLAUDE.md"
+    mkdir -p "$HOME/.claude"
+    if [ -f "$claude_md" ] && grep -q '<!-- ams:start -->' "$claude_md"; then
+        echo "CLAUDE.md: ams section already present — skipped"
+    else
+        cat >>"$claude_md" <<'EOF'
+
+<!-- ams:start -->
+## Code navigation (projects with .ams/index.db)
+Before Read on an unfamiliar code file: `ams describe <file>` — signatures
+with @start-end spans, 10-40x cheaper; then Read only the span.
+Symbol definition: `ams find <name>`. Directory: `ams tree <dir>`.
+Before changing an exported API: `ams refs <name>` + `ams related <file>`.
+Grep only for strings/comments/config. No index yet -> `ams build` once.
+<!-- ams:end -->
+EOF
+        echo "CLAUDE.md: ams workflow section appended to $claude_md"
+    fi
+fi
+
+cat <<'EOF'
+
+Next steps:
+  1. Index a project:        cd <project> && ams build
+  2. Claude Code plugin (skill + hooks that make agents actually use ams):
+       /plugin marketplace add StMalina/ams
+       /plugin install ams@ams
+  3. Optional, standing instructions for every project — either re-run with
+     AMS_CLAUDE_MD=1, or paste the snippet from the README into
+     ~/.claude/CLAUDE.md. Other agents (Codex, ...): see AGENTS.md.template.
+EOF

@@ -61,6 +61,12 @@ Prebuilt binary (Linux x64/arm64, macOS x64/arm64 — static musl on Linux):
 curl -fsSL https://raw.githubusercontent.com/StMalina/ams/main/install.sh | sh
 ```
 
+Env options: `AMS_INSTALL_DIR` (default `~/.local/bin`), `AMS_VERSION` (tag,
+default latest), `AMS_CLAUDE_MD=1` — also append the agent workflow snippet
+to `~/.claude/CLAUDE.md` (idempotent, marker-guarded; see
+[Integration](#integration)). The installer prints the plugin-install
+commands as next steps either way.
+
 Windows: download the `.zip` from
 [Releases](https://github.com/StMalina/ams/releases). From source:
 
