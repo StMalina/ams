@@ -62,13 +62,12 @@ curl -fsSL https://raw.githubusercontent.com/StMalina/ams/main/install.sh | sh
 ```
 
 The installer verifies the SHA-256 checksum, then runs `ams init`, which
-registers the agent workflow globally. With a terminal attached it asks
-which agents to register (Claude Code / Codex CLI / Gemini CLI, detected
-ones pre-selected); piped without a tty it registers for the detected ones.
-Claude Code gets a slim `~/.claude/AMS.md` plus one `@AMS.md` import line
-in `~/.claude/CLAUDE.md`; Codex and Gemini get a marker-guarded block in
-`~/.codex/AGENTS.md` / `~/.gemini/GEMINI.md`. All writes are backup +
-atomic and idempotent (see [Integration](#integration)).
+registers the agent workflow globally. With a terminal attached it shows a
+checkbox picker (arrows/space, detected agents pre-checked) covering Claude
+Code, Codex CLI, Gemini CLI, GitHub Copilot (CLI and VS Code), Windsurf,
+Cline, Roo Code, Kilo Code, OpenCode, OpenClaw, Pi, and Google Antigravity;
+piped without a tty it registers for the detected ones. All writes are
+backup + atomic and idempotent (see [Integration](#integration)).
 
 After that everything is hands-off: indexes build themselves on first use
 (any `ams` query in a git repo without `.ams/index.db` builds it at the git
@@ -118,7 +117,7 @@ explicit control and non-git directories.
 | `ams related <file>` | manually reading imports | deps + reverse deps (used-by) |
 | `ams annotate <file>:<Symbol.path> "doc"` | — | attach an LLM note to a symbol |
 | `ams gain` | — | accumulated token savings: output printed vs source covered |
-| `ams init` | manual CLAUDE.md editing | register the workflow with Claude Code / Codex / Gemini; `--show`, `--uninstall`, `--agents` |
+| `ams init` | manual CLAUDE.md editing | register the workflow with 13 coding agents (checkbox picker); `--show`, `--uninstall`, `--agents` |
 | `ams update` | re-running the installer | self-update to the latest release (also runs automatically once a day) |
 
 Flags: `--kind fn|method|class|struct|enum|trait|interface|const|type|mod`
@@ -280,20 +279,38 @@ workflow part of the agent's standing instructions; in our blind tests it
 is the one mechanism that reliably changes agent behavior. `ams init` sets
 it up per agent:
 
-- **Claude Code** — writes `~/.claude/AMS.md` (the full workflow, owned and
-  refreshed by ams) and adds one `@AMS.md` import line to
-  `~/.claude/CLAUDE.md`; migrates the legacy inline `<!-- ams:start -->`
-  block if present.
-- **Codex CLI / Gemini CLI** — upserts a marker-guarded block into
-  `~/.codex/AGENTS.md` / `~/.gemini/GEMINI.md`.
+| Agent | `--agents` | Global target | Mechanism |
+|---|---|---|---|
+| Claude Code | `claude` | `~/.claude/AMS.md` + `@AMS.md` import in `~/.claude/CLAUDE.md` | import |
+| Codex CLI | `codex` | `~/.codex/AGENTS.md` | marker block |
+| Gemini CLI | `gemini` | `~/.gemini/GEMINI.md` | marker block |
+| GitHub Copilot CLI | `copilot` | `~/.copilot/copilot-instructions.md` | marker block |
+| GitHub Copilot (VS Code) | `copilot-vscode` | `<VS Code profile>/User/prompts/ams.instructions.md` (`applyTo: '**'`) | own file |
+| Windsurf | `windsurf` | `~/.codeium/windsurf/memories/global_rules.md` | marker block |
+| Cline | `cline` | `~/Documents/Cline/Rules/ams.md` (or `~/Cline/Rules`) | own file |
+| Roo Code | `roo` | `~/.roo/rules/ams.md` | own file |
+| Kilo Code | `kilo` | `~/.kilocode/rules/ams.md` | own file |
+| OpenCode | `opencode` | `~/.config/opencode/AGENTS.md` | marker block |
+| OpenClaw | `openclaw` | `~/.openclaw/workspace/AGENTS.md` | marker block |
+| Pi | `pi` | `~/.pi/agent/AGENTS.md` | marker block |
+| Google Antigravity | `antigravity` | `~/.gemini/GEMINI.md` (shared with Gemini CLI) | marker block |
 
-Selection: `--agents claude,codex,gemini`, `--agents all`, `--agents auto`
-(detected config dirs), or interactive when run in a terminal. Idempotent,
-backup + atomic writes. `ams init --show` reports status; `ams init
---uninstall` removes everything. The installer runs it by default.
+Marker blocks (`<!-- ams:start -->` … `<!-- ams:end -->`) are upserted into
+files the agent owns; "own file" targets are dedicated files ams fully
+manages (created on install, deleted on uninstall). Claude Code migrates a
+legacy inline block to the slim import automatically.
 
-**Per-project for other agents** — copy the workflow from
-`AGENTS.md.template` into your project's `AGENTS.md`.
+Selection: `--agents claude,codex,...`, `--agents all`, `--agents auto`
+(detected config dirs), or the interactive checkbox picker when run in a
+terminal. Idempotent, backup + atomic writes. `ams init --show` reports
+status; `ams init --uninstall` removes everything. The installer runs it
+by default.
+
+**Per-project** — some agents have no global instructions file: Cursor
+reads only project-level `AGENTS.md` / `.cursor/rules` (User Rules live in
+its settings UI), and Hermes' global `SOUL.md` is a persona file, not a
+tool-workflow slot. For those — and for team-shared setups — copy the
+workflow from `AGENTS.md.template` into your project's `AGENTS.md`.
 
 ## Supported languages
 

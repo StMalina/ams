@@ -1,7 +1,8 @@
 #!/bin/sh
 # AMS installer: downloads the latest release binary for this platform and
-# registers the agent workflow (via `ams init`: interactive agent pick when a
-# terminal is available — Claude Code / Codex / Gemini — else auto-detect).
+# registers the agent workflow (via `ams init`: interactive checkbox pick when
+# a terminal is available — Claude Code, Codex, Gemini, Copilot, Windsurf,
+# Cline, Roo, Kilo, OpenCode, OpenClaw, Pi, Antigravity — else auto-detect).
 #   curl -fsSL https://raw.githubusercontent.com/StMalina/ams/main/install.sh | sh
 # Options via env:
 #   AMS_INSTALL_DIR      target directory (default: ~/.local/bin)
@@ -86,8 +87,8 @@ esac
 
 # --- register the workflow with the user's coding agents (default: on) ------
 # `ams init` is idempotent (backup + atomic writes, undo: ams init --uninstall).
-# Interactive pick over /dev/tty when a terminal is attached; otherwise it
-# registers for the agents it detects (~/.claude, ~/.codex, ~/.gemini).
+# Interactive checkbox pick over /dev/tty when a terminal is attached;
+# otherwise it registers for the agents whose config dirs it detects.
 if [ "${AMS_CLAUDE_MD:-1}" = "0" ]; then
     echo "registration skipped (AMS_CLAUDE_MD=0); run '$INSTALL_DIR/ams init' later to enable"
 elif [ -n "${AMS_AGENTS:-}" ]; then
@@ -103,5 +104,6 @@ plugin); ams checks for updates once a day. Optional next steps:
   - Claude Code plugin (guards + skill that make agents actually use ams):
       /plugin marketplace add StMalina/ams
       /plugin install ams@ams
-  - Per-project instructions for other agents: AGENTS.md.template in the repo.
+  - Agents without a global instructions file (Cursor, Hermes): copy
+    AGENTS.md.template from the repo into the project's AGENTS.md.
 EOF

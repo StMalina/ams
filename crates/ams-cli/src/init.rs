@@ -1,20 +1,24 @@
 //! `ams init` — register the AMS workflow with the user's coding agents.
 //!
-//! Supported agents:
-//!   claude  — slim `~/.claude/AMS.md` + one `@AMS.md` import in CLAUDE.md
-//!   codex   — marker-guarded inline block in `~/.codex/AGENTS.md`
-//!   gemini  — marker-guarded inline block in `~/.gemini/GEMINI.md`
+//! Three mechanisms, one per agent:
+//!   import — Claude Code: slim `~/.claude/AMS.md` + one `@AMS.md` line in CLAUDE.md
+//!   block  — marker-guarded inline block in the agent's global instructions file
+//!            (Codex, Gemini, Copilot CLI, Windsurf, OpenCode, OpenClaw, Pi,
+//!             Antigravity — the latter shares Gemini's ~/.gemini/GEMINI.md)
+//!   file   — a dedicated file ams fully owns inside the agent's rules directory
+//!            (Cline, Roo Code, Kilo Code, Copilot in VS Code)
 //!
-//! Selection: `--agents claude,codex` explicit; `--agents all`; default is
-//! interactive pick over /dev/tty (works under `curl | sh`), falling back to
-//! auto-detection (config dir exists) when no terminal is available.
+//! Selection: `--agents claude,codex,...` explicit; `--agents all`; default is
+//! an interactive checkbox picker over /dev/tty (works under `curl | sh`),
+//! falling back to a line prompt on exotic terminals and to auto-detection
+//! (config dir exists) when no terminal is available.
 //!
-//! Every write is backup (`.bak`) + temp-file + rename. Idempotent: a second
-//! run changes nothing and says so.
+//! Every edit of a shared file is backup (`.bak`) + temp-file + rename; owned
+//! files are simply written/removed. Idempotent: a second run changes nothing.
 
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 const AMS_MD: &str = include_str!("../assets/AMS.md");
@@ -27,9 +31,82 @@ enum Agent {
     Claude,
     Codex,
     Gemini,
+    Copilot,
+    CopilotVscode,
+    Windsurf,
+    Cline,
+    Roo,
+    Kilo,
+    Opencode,
+    Openclaw,
+    Pi,
+    Antigravity,
 }
 
-const ALL_AGENTS: [Agent; 3] = [Agent::Claude, Agent::Codex, Agent::Gemini];
+#[derive(Clone, Copy, PartialEq)]
+enum Mech {
+    Import,
+    Block,
+    OwnFile,
+}
+
+const ALL_AGENTS: [Agent; 13] = [
+    Agent::Claude,
+    Agent::Codex,
+    Agent::Gemini,
+    Agent::Copilot,
+    Agent::CopilotVscode,
+    Agent::Windsurf,
+    Agent::Cline,
+    Agent::Roo,
+    Agent::Kilo,
+    Agent::Opencode,
+    Agent::Openclaw,
+    Agent::Pi,
+    Agent::Antigravity,
+];
+
+fn home() -> Result<PathBuf> {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set")
+}
+
+fn xdg_config() -> Result<PathBuf> {
+    if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
+        if !x.is_empty() {
+            return Ok(PathBuf::from(x));
+        }
+    }
+    Ok(home()?.join(".config"))
+}
+
+/// User dir of the first VS Code variant found (Code, Insiders, VSCodium);
+/// defaults to plain Code when none is installed yet.
+fn vscode_user_dir() -> Result<PathBuf> {
+    let base = if cfg!(target_os = "macos") {
+        home()?.join("Library/Application Support")
+    } else {
+        xdg_config()?
+    };
+    for variant in ["Code", "Code - Insiders", "VSCodium"] {
+        let user = base.join(variant).join("User");
+        if user.is_dir() {
+            return Ok(user);
+        }
+    }
+    Ok(base.join("Code/User"))
+}
+
+/// Cline keeps global rules in ~/Documents/Cline/Rules; some Linux/WSL
+/// installs use ~/Cline/Rules instead — prefer whichever already exists.
+fn cline_rules_dir() -> Result<PathBuf> {
+    let alt = home()?.join("Cline/Rules");
+    if alt.is_dir() {
+        return Ok(alt);
+    }
+    Ok(home()?.join("Documents/Cline/Rules"))
+}
 
 impl Agent {
     fn name(self) -> &'static str {
@@ -37,6 +114,16 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Gemini => "gemini",
+            Agent::Copilot => "copilot",
+            Agent::CopilotVscode => "copilot-vscode",
+            Agent::Windsurf => "windsurf",
+            Agent::Cline => "cline",
+            Agent::Roo => "roo",
+            Agent::Kilo => "kilo",
+            Agent::Opencode => "opencode",
+            Agent::Openclaw => "openclaw",
+            Agent::Pi => "pi",
+            Agent::Antigravity => "antigravity",
         }
     }
 
@@ -45,6 +132,24 @@ impl Agent {
             Agent::Claude => "Claude Code",
             Agent::Codex => "Codex CLI",
             Agent::Gemini => "Gemini CLI",
+            Agent::Copilot => "GitHub Copilot CLI",
+            Agent::CopilotVscode => "GitHub Copilot (VS Code)",
+            Agent::Windsurf => "Windsurf",
+            Agent::Cline => "Cline",
+            Agent::Roo => "Roo Code",
+            Agent::Kilo => "Kilo Code",
+            Agent::Opencode => "OpenCode",
+            Agent::Openclaw => "OpenClaw",
+            Agent::Pi => "Pi",
+            Agent::Antigravity => "Google Antigravity",
+        }
+    }
+
+    fn mech(self) -> Mech {
+        match self {
+            Agent::Claude => Mech::Import,
+            Agent::CopilotVscode | Agent::Cline | Agent::Roo | Agent::Kilo => Mech::OwnFile,
+            _ => Mech::Block,
         }
     }
 
@@ -56,27 +161,63 @@ impl Agent {
                 }
             }
         }
-        let home = std::env::var("HOME").context("HOME is not set")?;
-        let sub = match self {
-            Agent::Claude => ".claude",
-            Agent::Codex => ".codex",
-            Agent::Gemini => ".gemini",
-        };
-        Ok(Path::new(&home).join(sub))
+        Ok(match self {
+            Agent::Claude => home()?.join(".claude"),
+            Agent::Codex => home()?.join(".codex"),
+            Agent::Gemini => home()?.join(".gemini"),
+            Agent::Copilot => home()?.join(".copilot"),
+            Agent::CopilotVscode => vscode_user_dir()?,
+            Agent::Windsurf => home()?.join(".codeium/windsurf"),
+            Agent::Cline => cline_rules_dir()?,
+            Agent::Roo => home()?.join(".roo"),
+            Agent::Kilo => home()?.join(".kilocode"),
+            Agent::Opencode => xdg_config()?.join("opencode"),
+            Agent::Openclaw => home()?.join(".openclaw"),
+            Agent::Pi => home()?.join(".pi"),
+            Agent::Antigravity => home()?.join(".gemini/antigravity"),
+        })
     }
 
-    /// The instructions file this agent loads globally.
+    /// The global instructions file this agent loads (the one we edit or own).
     fn memory_file(self) -> Result<PathBuf> {
         let dir = self.config_dir()?;
         Ok(match self {
             Agent::Claude => dir.join("CLAUDE.md"),
             Agent::Codex => dir.join("AGENTS.md"),
             Agent::Gemini => dir.join("GEMINI.md"),
+            Agent::Copilot => dir.join("copilot-instructions.md"),
+            Agent::CopilotVscode => dir.join("prompts/ams.instructions.md"),
+            Agent::Windsurf => dir.join("memories/global_rules.md"),
+            Agent::Cline => dir.join("ams.md"),
+            Agent::Roo => dir.join("rules/ams.md"),
+            Agent::Kilo => dir.join("rules/ams.md"),
+            Agent::Opencode => dir.join("AGENTS.md"),
+            Agent::Openclaw => dir.join("workspace/AGENTS.md"),
+            Agent::Pi => dir.join("agent/AGENTS.md"),
+            // Antigravity reads the same global file as Gemini CLI.
+            Agent::Antigravity => home()?.join(".gemini/GEMINI.md"),
         })
     }
 
+    /// Content of the dedicated file for OwnFile agents.
+    fn own_file_content(self) -> String {
+        match self {
+            // VS Code instructions files need frontmatter to apply globally.
+            Agent::CopilotVscode => {
+                format!("---\napplyTo: '**'\ndescription: AMS — code navigation via signatures\n---\n\n{AMS_MD}")
+            }
+            _ => AMS_MD.to_string(),
+        }
+    }
+
     fn detected(self) -> bool {
-        self.config_dir().map(|d| d.is_dir()).unwrap_or(false)
+        match self {
+            Agent::Cline => {
+                let ok = |p: &str| home().map(|h| h.join(p).is_dir()).unwrap_or(false);
+                ok("Documents/Cline") || ok("Cline")
+            }
+            _ => self.config_dir().map(|d| d.is_dir()).unwrap_or(false),
+        }
     }
 }
 
@@ -217,7 +358,30 @@ fn install_block(agent: Agent) -> Result<()> {
     write_if_changed(&file, &current, content, "ams block")
 }
 
+fn install_own_file(agent: Agent) -> Result<()> {
+    let file = agent.memory_file()?;
+    let content = agent.own_file_content();
+    if fs::read_to_string(&file).unwrap_or_default() == content {
+        println!("[ok] {} up to date", file.display());
+        return Ok(());
+    }
+    atomic_write(&file, &content)?;
+    println!("[ok] {} written", file.display());
+    Ok(())
+}
+
 fn uninstall_agent(agent: Agent) -> Result<()> {
+    match agent.mech() {
+        Mech::OwnFile => {
+            let file = agent.memory_file()?;
+            if file.exists() {
+                fs::remove_file(&file)?;
+                println!("[ok] {} removed", file.display());
+            }
+            return Ok(());
+        }
+        Mech::Import | Mech::Block => {}
+    }
     let file = agent.memory_file()?;
     if let Ok(current) = fs::read_to_string(&file) {
         let mut content = match find_block(&current, &file)? {
@@ -252,17 +416,19 @@ fn status_agent(agent: Agent) -> Result<()> {
     let ok = |b: bool| if b { "[ok]" } else { "[--]" };
     let file = agent.memory_file()?;
     let content = fs::read_to_string(&file).unwrap_or_default();
-    let registered = if agent == Agent::Claude {
-        let ams_md = Agent::Claude.config_dir()?.join("AMS.md");
-        let slim = fs::read_to_string(&ams_md).unwrap_or_default();
-        has_import(&content) && slim == AMS_MD
-    } else {
-        find_block(&content, &file)
+    let registered = match agent.mech() {
+        Mech::Import => {
+            let ams_md = Agent::Claude.config_dir()?.join("AMS.md");
+            let slim = fs::read_to_string(&ams_md).unwrap_or_default();
+            has_import(&content) && slim == AMS_MD
+        }
+        Mech::OwnFile => content == agent.own_file_content(),
+        Mech::Block => find_block(&content, &file)
             .map(|b| {
                 b.map(|(s, e)| content[s..e].contains(AMS_MD.trim()))
                     .unwrap_or(false)
             })
-            .unwrap_or(false)
+            .unwrap_or(false),
     };
     println!(
         "{} {} ({}): {}",
@@ -291,7 +457,10 @@ fn parse_agents(spec: &str) -> Result<Vec<Agent>> {
             .iter()
             .copied()
             .find(|a| a.name() == part)
-            .ok_or_else(|| anyhow::anyhow!("unknown agent '{part}' (known: claude, codex, gemini, all, auto)"))?;
+            .ok_or_else(|| {
+                let known: Vec<&str> = ALL_AGENTS.iter().map(|a| a.name()).collect();
+                anyhow::anyhow!("unknown agent '{part}' (known: {}, all, auto)", known.join(", "))
+            })?;
         if !out.contains(&agent) {
             out.push(agent);
         }
@@ -300,7 +469,144 @@ fn parse_agents(spec: &str) -> Result<Vec<Agent>> {
 }
 
 /// Interactive pick over /dev/tty (survives `curl | sh`); None when no tty.
+/// Checkbox UI on real terminals, line prompt as fallback.
 fn tty_select(detected: &[Agent]) -> Option<Vec<Agent>> {
+    #[cfg(unix)]
+    if let Some(picked) = checkbox_select(detected) {
+        return Some(picked);
+    }
+    line_select(detected)
+}
+
+#[cfg(unix)]
+mod raw_tty {
+    use std::os::unix::io::RawFd;
+
+    /// Puts the fd into no-echo/no-canonical mode; restores (and re-shows the
+    /// cursor) on drop, even on panic or early return.
+    pub struct RawMode {
+        fd: RawFd,
+        orig: libc::termios,
+    }
+
+    impl RawMode {
+        pub fn enable(fd: RawFd) -> Option<Self> {
+            let mut orig: libc::termios = unsafe { std::mem::zeroed() };
+            if unsafe { libc::tcgetattr(fd, &mut orig) } != 0 {
+                return None;
+            }
+            let mut raw = orig;
+            raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+            raw.c_cc[libc::VMIN] = 1;
+            raw.c_cc[libc::VTIME] = 0;
+            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+                return None;
+            }
+            Some(RawMode { fd, orig })
+        }
+    }
+
+    impl Drop for RawMode {
+        fn drop(&mut self) {
+            const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+            unsafe {
+                libc::write(
+                    self.fd,
+                    SHOW_CURSOR.as_ptr() as *const libc::c_void,
+                    SHOW_CURSOR.len(),
+                );
+                libc::tcsetattr(self.fd, libc::TCSANOW, &self.orig);
+            }
+        }
+    }
+}
+
+/// Arrow/space checkbox picker. None = raw mode unavailable, use the fallback.
+#[cfg(unix)]
+fn checkbox_select(detected: &[Agent]) -> Option<Vec<Agent>> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut tty = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let _raw = raw_tty::RawMode::enable(tty.as_raw_fd())?;
+
+    let mut checked: Vec<bool> = ALL_AGENTS.iter().map(|a| detected.contains(a)).collect();
+    let mut cursor = 0usize;
+    let n = ALL_AGENTS.len();
+
+    let _ = write!(
+        tty,
+        "\r\nRegister the AMS workflow for which agents?\r\n\
+         \x1b[2m  ↑/↓ move · space toggle · a all · n none · enter confirm · q skip\x1b[0m\r\n\x1b[?25l"
+    );
+    let draw = |tty: &mut fs::File, checked: &[bool], cursor: usize, first: bool| {
+        let mut out = String::new();
+        if !first {
+            out.push_str(&format!("\x1b[{n}A"));
+        }
+        for (i, a) in ALL_AGENTS.iter().enumerate() {
+            out.push_str(&format!(
+                "\r\x1b[2K{} [{}] {}{}\r\n",
+                if i == cursor { ">" } else { " " },
+                if checked[i] { "x" } else { " " },
+                a.label(),
+                if a.detected() { " \x1b[2m(detected)\x1b[0m" } else { "" },
+            ));
+        }
+        let _ = tty.write_all(out.as_bytes());
+        let _ = tty.flush();
+    };
+    draw(&mut tty, &checked, cursor, true);
+
+    let mut byte = [0u8; 1];
+    loop {
+        if tty.read_exact(&mut byte).is_err() {
+            return Some(Vec::new());
+        }
+        match byte[0] {
+            b' ' => checked[cursor] = !checked[cursor],
+            b'a' => checked.iter_mut().for_each(|c| *c = true),
+            b'n' => checked.iter_mut().for_each(|c| *c = false),
+            b'j' => cursor = (cursor + 1) % n,
+            b'k' => cursor = (cursor + n - 1) % n,
+            b'\r' | b'\n' => break,
+            b'q' | 0x03 => {
+                // q / Ctrl-C: register nothing.
+                checked.iter_mut().for_each(|c| *c = false);
+                break;
+            }
+            0x1b => {
+                // ESC [ A/B — arrow keys.
+                let mut seq = [0u8; 2];
+                if tty.read_exact(&mut seq).is_ok() && seq[0] == b'[' {
+                    match seq[1] {
+                        b'A' => cursor = (cursor + n - 1) % n,
+                        b'B' => cursor = (cursor + 1) % n,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        draw(&mut tty, &checked, cursor, false);
+    }
+    let _ = write!(tty, "\r\n");
+
+    Some(
+        ALL_AGENTS
+            .iter()
+            .zip(&checked)
+            .filter(|(_, c)| **c)
+            .map(|(a, _)| *a)
+            .collect(),
+    )
+}
+
+/// Plain line prompt — for terminals where raw mode fails.
+fn line_select(detected: &[Agent]) -> Option<Vec<Agent>> {
     let mut tty_in = BufReader::new(fs::File::open("/dev/tty").ok()?);
     let mut tty_out = fs::OpenOptions::new().write(true).open("/dev/tty").ok()?;
 
@@ -315,7 +621,7 @@ fn tty_select(detected: &[Agent]) -> Option<Vec<Agent>> {
     for a in ALL_AGENTS {
         let _ = writeln!(
             tty_out,
-            "  - {:<7} {} {}",
+            "  - {:<15} {} {}",
             a.name(),
             a.label(),
             if a.detected() { "(detected)" } else { "" }
@@ -385,18 +691,47 @@ pub fn run(show: bool, uninstall: bool, agents: Option<String>) -> Result<()> {
     };
 
     if targets.is_empty() {
-        println!("nothing registered; run `ams init --agents claude,codex,gemini` anytime");
+        println!("nothing registered; run `ams init --agents claude,codex,...` anytime (see --help)");
         return Ok(());
     }
 
     for a in &targets {
-        match a {
-            Agent::Claude => install_claude()?,
-            _ => install_block(*a)?,
+        match a.mech() {
+            Mech::Import => install_claude()?,
+            Mech::Block => install_block(*a)?,
+            Mech::OwnFile => install_own_file(*a)?,
         }
     }
     println!(
         "\nDone. Undo anytime: ams init --uninstall; status: ams init --show"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_agents_names_and_aliases() {
+        let picked = parse_agents("claude, roo,kilo").unwrap();
+        assert_eq!(picked, vec![Agent::Claude, Agent::Roo, Agent::Kilo]);
+        assert_eq!(parse_agents("all").unwrap().len(), ALL_AGENTS.len());
+        assert!(parse_agents("cursor").is_err());
+    }
+
+    #[test]
+    fn own_file_content_has_frontmatter_only_for_vscode() {
+        assert!(Agent::CopilotVscode.own_file_content().starts_with("---\napplyTo: '**'"));
+        assert_eq!(Agent::Roo.own_file_content(), AMS_MD);
+    }
+
+    #[test]
+    fn antigravity_shares_gemini_file() {
+        std::env::set_var("HOME", "/tmp/ams-test-home");
+        assert_eq!(
+            Agent::Antigravity.memory_file().unwrap(),
+            Agent::Gemini.memory_file().unwrap()
+        );
+    }
 }

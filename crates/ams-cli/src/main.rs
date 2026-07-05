@@ -77,7 +77,8 @@ enum Cmd {
     Related {
         file: String,
     },
-    /// Register the AMS workflow with coding agents (Claude Code, Codex, Gemini)
+    /// Register the AMS workflow with coding agents (Claude Code, Codex, Gemini,
+    /// Copilot, Windsurf, Cline, Roo, Kilo, OpenCode, OpenClaw, Pi, Antigravity)
     Init {
         /// Print current registration status without changing anything
         #[arg(long)]
@@ -85,8 +86,9 @@ enum Cmd {
         /// Remove the registration (all agents, or those given via --agents)
         #[arg(long)]
         uninstall: bool,
-        /// Agents: comma list of claude,codex,gemini — or 'all' / 'auto' (detected).
-        /// Without this flag: interactive pick when a terminal is available, else auto.
+        /// Comma list of claude,codex,gemini,copilot,copilot-vscode,windsurf,cline,
+        /// roo,kilo,opencode,openclaw,pi,antigravity — or 'all' / 'auto' (detected).
+        /// Without this flag: interactive checkbox pick when a terminal is available.
         #[arg(long)]
         agents: Option<String>,
     },
