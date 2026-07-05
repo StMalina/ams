@@ -810,6 +810,12 @@ fn resolve_imports(tx: &rusqlite::Transaction, root: &Path) -> Result<()> {
     let psr4 = std::fs::read_to_string(root.join("composer.json"))
         .map(|text| parse_psr4(&text))
         .unwrap_or_default();
+    let go_module = std::fs::read_to_string(root.join("go.mod"))
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|l| l.trim().strip_prefix("module ").map(|m| m.trim().to_string()))
+        });
 
     let rows: Vec<(i64, String, String, String)> = tx
         .prepare(
@@ -824,6 +830,11 @@ fn resolve_imports(tx: &rusqlite::Transaction, root: &Path) -> Result<()> {
             "py" => resolve_python(&files, &from, &target),
             "rs" => resolve_rust(&files, &target),
             "php" => resolve_php(&files, &from, &target, &psr4),
+            "go" => go_module
+                .as_deref()
+                .and_then(|m| resolve_go(&files, m, &target)),
+            "java" | "kt" => resolve_jvm(&files, &target, &lang),
+            "rb" => resolve_ruby(&files, &from, &target),
             _ if target.starts_with('.') => resolve_relative(&files, &from, &target),
             _ => None,
         };
@@ -952,6 +963,84 @@ fn parse_psr4(composer_json: &str) -> Vec<(String, Vec<String>)> {
     map
 }
 
+/// Go imports name a package (= directory) under the module path from
+/// go.mod. A directory has many files but resolved_file_id is single, so
+/// pick the file matching the package name (`auth/auth.go`), else the
+/// first .go file in the directory — enough for used-by navigation.
+fn resolve_go(files: &HashMap<String, i64>, module: &str, target: &str) -> Option<i64> {
+    let dir = if target == module {
+        ""
+    } else {
+        target.strip_prefix(module)?.strip_prefix('/')?
+    };
+    if dir.is_empty() {
+        // Root package: prefer the file named after the module's last
+        // segment, skipping a /vN major-version suffix (chi/v5 → chi.go).
+        let seg = module.rsplit('/').find(|s| {
+            !(s.len() > 1 && s.starts_with('v') && s[1..].chars().all(|c| c.is_ascii_digit()))
+        });
+        if let Some(id) = seg.and_then(|s| files.get(&format!("{s}.go"))) {
+            return Some(*id);
+        }
+    } else {
+        let base = dir.rsplit('/').next().unwrap_or(dir);
+        if let Some(id) = files.get(&format!("{dir}/{base}.go")) {
+            return Some(*id);
+        }
+    }
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    files
+        .iter()
+        .filter(|(p, _)| {
+            p.strip_prefix(prefix.as_str())
+                .is_some_and(|rest| !rest.contains('/') && rest.ends_with(".go"))
+        })
+        .min_by_key(|(p, _)| p.as_str())
+        .map(|(_, id)| *id)
+}
+
+/// `import a.b.C` (Java) / `import a.b.C` (Kotlin) → a/b/C.java under
+/// common source roots. Wildcard/package imports resolve to nothing (a
+/// package is a directory, not a file).
+fn resolve_jvm(files: &HashMap<String, i64>, target: &str, lang: &str) -> Option<i64> {
+    let as_path = target.replace('.', "/");
+    const ROOTS: &[&str] = &[
+        "",
+        "src/main/java/",
+        "src/main/kotlin/",
+        "src/",
+        "app/src/main/java/",
+        "app/src/main/kotlin/",
+        "src/test/java/",
+        "src/test/kotlin/",
+    ];
+    let exts: &[&str] = if lang == "kt" {
+        &["kt", "java"]
+    } else {
+        &["java", "kt"]
+    };
+    for root in ROOTS {
+        for ext in exts {
+            if let Some(id) = files.get(&format!("{root}{as_path}.{ext}")) {
+                return Some(*id);
+            }
+        }
+    }
+    None
+}
+
+/// `require_relative 'x'` resolves against the file's directory;
+/// `require 'x'` against the conventional lib/ load path, then the root.
+fn resolve_ruby(files: &HashMap<String, i64>, from: &str, target: &str) -> Option<i64> {
+    resolve_relative(files, from, target)
+        .or_else(|| files.get(&format!("lib/{target}.rb")).copied())
+        .or_else(|| files.get(&format!("{target}.rb")).copied())
+}
+
 fn resolve_rust(files: &HashMap<String, i64>, target: &str) -> Option<i64> {
     let path = target.strip_prefix("crate::")?;
     // use crate::a::b::Item — Item may be a symbol, not a module; try both depths
@@ -1019,5 +1108,46 @@ mod tests {
         assert_eq!(r("App\\Legacy\\Old"), Some(2)); // second dir of the array
         assert_eq!(r("App\\Tests\\MailerTest"), Some(3)); // autoload-dev
         assert_eq!(r("Vendor\\Pkg\\Thing"), None); // outside the map
+    }
+
+    #[test]
+    fn go_module_lookup() {
+        let mut files = HashMap::new();
+        files.insert("internal/auth/auth.go".to_string(), 1_i64);
+        files.insert("internal/auth/token.go".to_string(), 2_i64);
+        files.insert("pkg/util/helpers.go".to_string(), 3_i64);
+        files.insert("main.go".to_string(), 4_i64);
+
+        let m = "github.com/acme/app";
+        // package-name file preferred over alphabetical order
+        assert_eq!(resolve_go(&files, m, "github.com/acme/app/internal/auth"), Some(1));
+        // no <dir>/<base>.go — first .go in the directory
+        assert_eq!(resolve_go(&files, m, "github.com/acme/app/pkg/util"), Some(3));
+        // module root import — no app.go, falls back to first root .go
+        assert_eq!(resolve_go(&files, m, "github.com/acme/app"), Some(4));
+        // foreign module untouched
+        assert_eq!(resolve_go(&files, m, "github.com/other/dep/x"), None);
+
+        // /vN major-version suffix: chi/v5 root import → chi.go
+        files.insert("chi.go".to_string(), 5_i64);
+        let mv = "github.com/go-chi/chi/v5";
+        assert_eq!(resolve_go(&files, mv, "github.com/go-chi/chi/v5"), Some(5));
+    }
+
+    #[test]
+    fn jvm_import_lookup() {
+        let mut files = HashMap::new();
+        files.insert("src/main/java/com/acme/Auth.java".to_string(), 1_i64);
+        files.insert("src/main/kotlin/com/acme/Token.kt".to_string(), 2_i64);
+        files.insert("com/acme/Flat.java".to_string(), 3_i64);
+
+        assert_eq!(resolve_jvm(&files, "com.acme.Auth", "java"), Some(1));
+        // Kotlin importing a Java class and vice versa
+        assert_eq!(resolve_jvm(&files, "com.acme.Token", "java"), Some(2));
+        assert_eq!(resolve_jvm(&files, "com.acme.Auth", "kt"), Some(1));
+        // repo-root source layout
+        assert_eq!(resolve_jvm(&files, "com.acme.Flat", "java"), Some(3));
+        // stdlib / external packages stay unresolved
+        assert_eq!(resolve_jvm(&files, "java.util.List", "java"), None);
     }
 }

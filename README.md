@@ -229,9 +229,15 @@ platform-specific) — install it separately via `cargo install`.
 
 ## Supported languages
 
-TypeScript, TSX, JavaScript, JSX (ESM and CommonJS), Rust, Python, Go, PHP.
-Minified/generated files (>2 MB or 2500+ char lines) are skipped
-automatically.
+TypeScript, TSX, JavaScript, JSX (ESM and CommonJS), Rust, Python, Go, PHP,
+Java, Kotlin, C#, Ruby. Minified/generated files (>2 MB or 2500+ char lines)
+are skipped automatically.
+
+Reverse-dependency (`used-by`) resolution: JS/TS relative imports, Python
+modules, Rust `crate::` paths, PHP `require` paths + PSR-4 namespaces from
+composer.json, Go packages via go.mod, Java/Kotlin imports under common
+source roots (`src/main/java`, ...). Everything else (external packages)
+shows as an external dep.
 
 ## Architecture
 

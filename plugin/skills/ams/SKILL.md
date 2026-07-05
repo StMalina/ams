@@ -82,4 +82,5 @@ Never read a whole file when you already have its spans.
 
 Searching for strings, log messages, config values, comments → still Grep.
 ams indexes structure (symbols, spans, imports, references), not text.
-Languages: TypeScript/TSX, JavaScript/JSX (ESM+CommonJS), Rust, Python, Go, PHP.
+Languages: TypeScript/TSX, JavaScript/JSX (ESM+CommonJS), Rust, Python, Go,
+PHP, Java, Kotlin, C#, Ruby.

@@ -3,9 +3,13 @@ use anyhow::Result;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
+pub mod csharp;
 pub mod go;
+pub mod java;
+pub mod kotlin;
 pub mod php;
 pub mod python;
+pub mod ruby;
 pub mod rust;
 pub mod typescript;
 
@@ -15,7 +19,8 @@ pub trait LangParser: Send + Sync {
 }
 
 pub const SUPPORTED_EXTS: &[&str] = &[
-    "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "go", "php",
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "go", "php", "java", "kt", "kts", "cs",
+    "rb",
 ];
 
 pub fn parser_for_ext(ext: &str) -> Option<&'static dyn LangParser> {
@@ -25,6 +30,10 @@ pub fn parser_for_ext(ext: &str) -> Option<&'static dyn LangParser> {
     static PY: python::PythonParser = python::PythonParser;
     static GO: go::GoParser = go::GoParser;
     static PHP: php::PhpParser = php::PhpParser;
+    static JAVA: java::JavaParser = java::JavaParser;
+    static KT: kotlin::KotlinParser = kotlin::KotlinParser;
+    static CS: csharp::CSharpParser = csharp::CSharpParser;
+    static RB: ruby::RubyParser = ruby::RubyParser;
     Some(match ext {
         "ts" => &TS,
         "tsx" | "js" | "jsx" | "mjs" | "cjs" => &TSX,
@@ -32,6 +41,10 @@ pub fn parser_for_ext(ext: &str) -> Option<&'static dyn LangParser> {
         "py" => &PY,
         "go" => &GO,
         "php" => &PHP,
+        "java" => &JAVA,
+        "kt" | "kts" => &KT,
+        "cs" => &CS,
+        "rb" => &RB,
         _ => return None,
     })
 }

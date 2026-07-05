@@ -55,4 +55,4 @@ upgrade.
 
 **Not a grep replacement:** strings, log lines, config values → still
 `rg`/`grep`. Supported languages: TypeScript/TSX, JavaScript/JSX
-(ESM+CommonJS), Rust, Python, Go, PHP.
+(ESM+CommonJS), Rust, Python, Go, PHP, Java, Kotlin, C#, Ruby.
