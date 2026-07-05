@@ -74,10 +74,19 @@ for seg in re.split(r"&&|\|\||[;|]", cmd):
         sys.exit(0)
     if not tokens:
         continue
-    # skip env-var prefixes
-    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
-        tokens.pop(0)
-    if not tokens:
+    # Unwrap env-var prefixes and command wrappers: `FOO=1 rtk grep X`,
+    # `sudo grep X`, `rtk proxy rg X` must still hit the guard.
+    WRAPPERS = {"rtk", "command", "sudo", "env", "nice", "nohup"}
+    while tokens:
+        while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+            tokens.pop(0)
+        if tokens and tokens[0].rsplit("/", 1)[-1] in WRAPPERS:
+            w = tokens.pop(0).rsplit("/", 1)[-1]
+            if w == "rtk" and tokens and tokens[0] == "proxy":
+                tokens.pop(0)
+            continue
+        break
+    if not tokens or tokens[0] == "ams":
         continue
     p = pattern_of(tokens)
     if p and IDENT.fullmatch(p) and (any(c.isupper() for c in p) or "_" in p):
