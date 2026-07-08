@@ -87,9 +87,10 @@ fn collect_top(node: Node, src: &str, out: &mut ParsedFile) {
 }
 
 /// `function_declaration`s directly inside a `class_body` become `Method`
-/// children (always non-exported, mirroring the TS/PHP parsers). Everything
-/// else in a class body — properties, secondary constructors, nested types,
-/// and `companion_object` members — is intentionally skipped.
+/// children (always non-exported, mirroring the TS/PHP parsers). Companion
+/// functions (`companion object { fun create() }`) are call targets like any
+/// method — flattened into the same children list. Everything else in a class
+/// body — properties, secondary constructors, nested types — is skipped.
 fn collect_methods(node: Node, src: &str, sym: &mut ParsedSymbol) {
     let Some(body) = find_child(node, &["class_body"]) else {
         return;
@@ -101,6 +102,8 @@ fn collect_methods(node: Node, src: &str, sym: &mut ParsedSymbol) {
                 m.kind = SymbolKind::Method;
                 sym.children.push(m);
             }
+        } else if member.kind() == "companion_object" {
+            collect_methods(member, src, sym);
         }
     }
 }

@@ -63,6 +63,74 @@ fn test_blocks_become_test_symbols() {
     assert_eq!(find(&parsed.symbols, "lab-style case").kind, SymbolKind::Test);
 }
 
+const OBJECT_SRC: &str = r#"const ordersRegistry = {
+  limit: 50,
+  customer: {
+    async updateContact(orderId, contact) {
+      return db.update(orderId, contact);
+    },
+    remove: async (id) => db.remove(id),
+  },
+  list(filter) {
+    return db.query(filter);
+  },
+};
+
+const config = { host: "localhost", port: 5432 };
+
+module.exports = {
+  ordersRegistry,
+  async handleBulkSync(req, res) {
+    return res.send(await bulk(req.body));
+  },
+  ping: () => "pong",
+};
+"#;
+
+#[test]
+fn object_literal_methods_are_children() {
+    let parsed = JS.parse(OBJECT_SRC).unwrap();
+
+    let obj = find(&parsed.symbols, "ordersRegistry");
+    assert_eq!(obj.kind, SymbolKind::Const);
+
+    // Shorthand method at the top level of the literal.
+    let list = find(&obj.children, "list");
+    assert_eq!(list.kind, SymbolKind::Method);
+    assert_eq!(list.signature, "list(filter)");
+    assert_eq!((list.start_line, list.end_line), (9, 11));
+
+    // Nested object carries its own methods; plain data keys are skipped.
+    let customer = find(&obj.children, "customer");
+    assert!(obj.children.iter().all(|c| c.name != "limit"));
+    let update = find(&customer.children, "updateContact");
+    assert_eq!(update.kind, SymbolKind::Method);
+    assert_eq!(update.signature, "async updateContact(orderId, contact)");
+    assert_eq!((update.start_line, update.end_line), (4, 6));
+
+    // Arrow-function property counts as a method too.
+    let remove = find(&customer.children, "remove");
+    assert_eq!(remove.signature, "remove: async (id) =>");
+
+    // Pure-data object stays a childless Const.
+    assert!(find(&parsed.symbols, "config").children.is_empty());
+}
+
+#[test]
+fn module_exports_inline_methods_are_exported_symbols() {
+    let parsed = JS.parse(OBJECT_SRC).unwrap();
+
+    let bulk = find(&parsed.symbols, "handleBulkSync");
+    assert!(bulk.exported);
+    assert_eq!(bulk.kind, SymbolKind::Method);
+
+    let ping = find(&parsed.symbols, "ping");
+    assert!(ping.exported);
+
+    // `ordersRegistry` shorthand re-export still flips the const to exported.
+    assert!(find(&parsed.symbols, "ordersRegistry").exported);
+}
+
 #[test]
 fn property_head_without_callback_is_not_a_test() {
     let parsed = JS.parse(TEST_SRC).unwrap();

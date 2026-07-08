@@ -26,6 +26,11 @@ class Widget(val x: Int) {
     }
 
     private fun secret() {}
+
+    companion object {
+        fun fromConfig(raw: String): Widget = Widget(raw.length)
+        val EMPTY = Widget(0)
+    }
 }
 
 data class Point(val x: Int, val y: Int)
@@ -81,6 +86,12 @@ fn kotlin_parses_class_with_methods_and_doc() {
     let secret = find(&widget.children, "secret");
     assert_eq!(secret.kind, SymbolKind::Method);
     assert!(!secret.exported);
+
+    // Companion functions are flattened into the class's method list;
+    // companion properties stay out.
+    let from_config = find(&widget.children, "fromConfig");
+    assert_eq!(from_config.kind, SymbolKind::Method);
+    assert!(widget.children.iter().all(|c| c.name != "EMPTY"));
 }
 
 #[test]

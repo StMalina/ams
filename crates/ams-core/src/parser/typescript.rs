@@ -159,6 +159,10 @@ fn collect_top(
                 } else {
                     (SymbolKind::Const, value)
                 };
+                let children = value
+                    .filter(|v| !is_fn && v.kind() == "object")
+                    .map(|v| object_methods(v, src))
+                    .unwrap_or_default();
                 let (start, end) = line_span(node);
                 let sig = signature(src, node, body)
                     .trim_end_matches(|c| c == '=' || c == ' ')
@@ -172,7 +176,7 @@ fn collect_top(
                     exported,
                     body_hash: body_hash(src, node),
                     doc: preceding_doc(node, src),
-                    children: vec![],
+                    children,
                 });
             }
         }
@@ -218,6 +222,12 @@ fn collect_top(
                                 }
                                 _ => {}
                             }
+                        }
+                        // Methods defined inline in the exports object are the
+                        // module's API — surface them as exported symbols.
+                        for mut sym in object_methods(right, src) {
+                            sym.exported = true;
+                            out.symbols.push(sym);
                         }
                     }
                     "identifier" => {
@@ -308,6 +318,74 @@ fn simple_symbol(node: Node, src: &str, kind: SymbolKind, exported: bool) -> Opt
         doc: preceding_doc(node, src),
         children: vec![],
     })
+}
+
+/// Methods declared inside an object literal (`const api = { async run() {} }`,
+/// `key: (x) => …`) are real call targets that `find`/`describe` must see.
+/// Nested objects recurse: `{ volunteer: { updateEmail() {} } }` yields a
+/// `volunteer` child carrying its own methods. Plain data keys are skipped, so
+/// config-style objects stay a single `Const` line.
+fn object_methods(obj: Node, src: &str) -> Vec<ParsedSymbol> {
+    let mut out = Vec::new();
+    let mut cursor = obj.walk();
+    for prop in obj.named_children(&mut cursor) {
+        match prop.kind() {
+            "method_definition" => {
+                if let Some(sym) = simple_symbol(prop, src, SymbolKind::Method, false) {
+                    out.push(sym);
+                }
+            }
+            "pair" => {
+                let (Some(key), Some(value)) = (
+                    prop.child_by_field_name("key"),
+                    prop.child_by_field_name("value"),
+                ) else {
+                    continue;
+                };
+                if key.kind() == "computed_property_name" {
+                    continue;
+                }
+                let name = unquote(node_text(src, key));
+                match value.kind() {
+                    "arrow_function" | "function_expression" | "function" => {
+                        let (start, end) = line_span(prop);
+                        out.push(ParsedSymbol {
+                            name,
+                            kind: SymbolKind::Method,
+                            signature: signature(src, prop, value.child_by_field_name("body")),
+                            start_line: start,
+                            end_line: end,
+                            exported: false,
+                            body_hash: body_hash(src, prop),
+                            doc: preceding_doc(prop, src),
+                            children: vec![],
+                        });
+                    }
+                    "object" => {
+                        let children = object_methods(value, src);
+                        if children.is_empty() {
+                            continue;
+                        }
+                        let (start, end) = line_span(prop);
+                        out.push(ParsedSymbol {
+                            name,
+                            kind: SymbolKind::Const,
+                            signature: signature(src, prop, Some(value)),
+                            start_line: start,
+                            end_line: end,
+                            exported: false,
+                            body_hash: body_hash(src, prop),
+                            doc: preceding_doc(prop, src),
+                            children,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Test-runner block keywords across mocha / jest / vitest / node:test /
