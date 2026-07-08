@@ -253,10 +253,13 @@ Read/Grep, and four hooks (`plugin/hooks/`):
 - `PreToolUse` on `Read` — the **read guard**: the first `Read` of a large
   (150+ lines), indexed code file is intercepted once and answered with
   `ams describe` output instead of the file — signatures with exact spans,
-  so the agent's next `Read` is a targeted `offset/limit`. Repeating the
-  same `Read` passes (so `Edit` chains keep working); targeted reads, small
-  files, and unindexed projects are never touched. Opt out with
-  `AMS_NO_READ_GUARD=1`.
+  so the agent's next `Read` is a targeted `offset/limit`. A worth-it gate
+  keeps the guard honest: it blocks only when targeted span reads would beat
+  the full `Read` by more than the interception itself costs, so a 160-line
+  file with two exports passes straight through while a 2000-line hub file
+  is intercepted. Repeating the same `Read` passes (so `Edit` chains keep
+  working); targeted reads, small files, and unindexed projects are never
+  touched. Opt out with `AMS_NO_READ_GUARD=1`.
 - `PreToolUse` on `Grep` — the **grep guard**: a Grep whose pattern is a
   bare identifier (camelCase / snake_case) that exists in the index is
   intercepted once and answered with `ams find` output — exact definitions

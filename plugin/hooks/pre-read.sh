@@ -45,7 +45,8 @@ esac
 
 [ -f "$FILE" ] || exit 0
 
-# Small files: describe does not pay for the extra round-trip.
+# Cheap pre-filter before touching the index; the real decision is the
+# worth-it gate below, computed from the actual describe output.
 lines=$(wc -l <"$FILE" 2>/dev/null) || exit 0
 [ "${lines:-0}" -ge 150 ] || exit 0
 
@@ -64,6 +65,18 @@ marker="${TMPDIR:-/tmp}/.ams-read-guard-${SID}-$(printf '%s' "$FILE" | cksum | t
 rel=${FILE#"$root"/}
 out=$(cd "$root" && ams describe "$rel" 2>/dev/null) || exit 0
 [ -n "$out" ] || exit 0
+
+# Worth-it gate. Blocking is only profitable when targeted span reads beat
+# the full Read by more than what the interception itself costs (injected
+# describe output + error preamble + the retry round-trip, ~45 lines-worth).
+# Model: the agent typically ends up reading ~2 spans of lines/spans each.
+# A 160-line file with 2 exports fails this gate (agent needs it all anyway);
+# a hub file with dozens of symbols passes by a mile.
+spans=$(printf '%s\n' "$out" | grep -Ec ' @[0-9]+-[0-9]+')
+[ "${spans:-0}" -ge 3 ] || exit 0
+dlines=$(printf '%s\n' "$out" | wc -l)
+saving=$(( lines - 2 * lines / spans - dlines - 45 ))
+[ "$saving" -gt 0 ] || exit 0
 
 touch "$marker" 2>/dev/null
 
