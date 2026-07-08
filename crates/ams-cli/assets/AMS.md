@@ -12,8 +12,9 @@ once at the root (takes seconds). No `ams` binary → ignore this section.
 
 **Before Grep for a symbol definition:** `ams find <name>` (exact spans, cross-language).
 **Orienting in a directory:** `ams tree <dir>` — instead of Glob + serial Reads; high `api`+`used-by` = hub file.
-**Before changing any exported API:** `ams refs <name>` (call sites) + `ams related <file>` (reverse deps — what breaks).
+**Before changing any exported API:** `ams refs <name>` (call sites) + `ams related <file>` (reverse deps — what breaks; `--depth 2` for the transitive blast radius, rolled up by directory).
 **Exact name unknown:** `ams search <words>` — full-text over names/signatures/docstrings, any language.
+**Untangling module structure:** `ams cycles [dir]` — dependency cycles over resolved imports.
 
 ## Boundaries
 

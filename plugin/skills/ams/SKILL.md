@@ -51,7 +51,9 @@ Never read a whole file when you already have its spans.
 ## Before changing any exported API
 
 - `ams related <file>` — deps + reverse deps (`used-by`): what breaks if you
-  change this file. This is info you can't cheaply get with Grep.
+  change this file. This is info you can't cheaply get with Grep. Add
+  `--depth 2` for the transitive blast radius (levels beyond direct importers
+  come rolled up by directory with counts).
 - `ams refs <name>` — usage sites: `calls 12, 45 | value 88`. `value` = passed
   as handler/callback (router registrations etc.). Common names collapse to
   per-file counts — narrow with `--in <dir>`. Not indexed: dynamic dispatch,
@@ -73,6 +75,8 @@ Never read a whole file when you already have its spans.
   NOT edit (legacy, third-party, foreign modules): persist a non-obvious
   insight out-of-band. Survives reindexing; flagged `[stale]` if the body
   changes.
+- `ams cycles [dir]` — module dependency cycles (strongly connected import
+  groups) over resolved imports; the place to start when untangling structure.
 - `ams gain` — accumulated token savings (output printed vs source covered).
 - `--exported` (describe/find) — public surface only; `--kind fn|class|...` on find.
 - `--json` — machine-readable output.

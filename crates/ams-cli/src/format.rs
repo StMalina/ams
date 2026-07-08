@@ -371,8 +371,40 @@ pub fn related(info: &RelatedInfo) -> String {
             out.push_str(&format!("  used-by: {}\n", info.used_by.join(", ")));
         }
     }
+    for lvl in &info.impact {
+        let mut dirs: Vec<String> = lvl
+            .dirs
+            .iter()
+            .take(15)
+            .map(|(d, n)| format!("{d} ({n})"))
+            .collect();
+        if lvl.dirs.len() > 15 {
+            dirs.push(format!("… {} more dirs", lvl.dirs.len() - 15));
+        }
+        out.push_str(&format!(
+            "  impact level {}: {} files — {}\n",
+            lvl.level,
+            lvl.total,
+            dirs.join(", ")
+        ));
+    }
     if info.internal_deps.is_empty() && info.external_deps.is_empty() && info.used_by.is_empty() {
         out.push_str("  no known relations\n");
+    }
+    out
+}
+
+pub fn cycles(cycles: &[Vec<String>]) -> String {
+    if cycles.is_empty() {
+        return "no dependency cycles\n".to_string();
+    }
+    let mut out = format!(
+        "{} dependency cycle{}:\n",
+        cycles.len(),
+        if cycles.len() == 1 { "" } else { "s" }
+    );
+    for c in cycles {
+        out.push_str(&format!("  ({} files) {}\n", c.len(), c.join(" <-> ")));
     }
     out
 }

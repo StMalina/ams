@@ -168,6 +168,19 @@ pub struct RelatedInfo {
     pub internal_deps: Vec<String>,
     pub external_deps: Vec<String>,
     pub used_by: Vec<String>,
+    /// Transitive reverse deps beyond `used_by` (levels 2..=depth), rolled up
+    /// by directory — level 1 is what breaks, deeper levels are awareness.
+    pub impact: Vec<ImpactLevel>,
+}
+
+/// One BFS ring of `related --depth`: files first reached at this distance
+/// over reverse-import edges, as directory → count (full paths would dump
+/// hundreds of lines for a hub).
+#[derive(Debug, Serialize)]
+pub struct ImpactLevel {
+    pub level: u32,
+    pub total: u32,
+    pub dirs: Vec<(String, u32)>,
 }
 
 /// Aggregated per-command usage stats for `ams gain`.

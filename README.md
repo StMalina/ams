@@ -114,7 +114,8 @@ explicit control and non-git directories.
 | `ams search <words>` | not really possible | full-text over names/signatures/docs, ranked (FTS5) |
 | `ams refs <name>` | `Grep` for a name, with noise | usages: file, line |
 | `ams tree [dir]` | `Glob` + a series of `Read`s | one line per file; auto directory rollup on big projects; `--hubs`, `--depth N` |
-| `ams related <file>` | manually reading imports | deps + reverse deps (used-by) |
+| `ams related <file>` | manually reading imports | deps + reverse deps (used-by); `--depth N` walks the transitive blast radius, deeper levels rolled up by directory |
+| `ams cycles [dir]` | not really possible | module dependency cycles (strongly connected import groups) |
 | `ams annotate <file>:<Symbol.path> "doc"` | — | attach an LLM note to a symbol |
 | `ams gain` | — | accumulated token savings: output printed vs source covered |
 | `ams init` | manual CLAUDE.md editing | register the workflow with 13 coding agents (checkbox picker); `--show`, `--uninstall`, `--agents` |

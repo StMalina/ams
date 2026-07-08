@@ -76,6 +76,15 @@ enum Cmd {
     /// Dependencies and reverse dependencies of a file
     Related {
         file: String,
+        /// Also walk transitive reverse deps this many levels out (blast
+        /// radius); levels beyond the first are rolled up by directory
+        #[arg(long, default_value_t = 1)]
+        depth: u32,
+    },
+    /// Module dependency cycles (strongly connected import groups)
+    Cycles {
+        /// Only cycles touching this directory
+        dir: Option<String>,
     },
     /// Register the AMS workflow with coding agents (Claude Code, Codex, Gemini,
     /// Copilot, Windsurf, Cline, Roo, Kilo, OpenCode, OpenClaw, Pi, Antigravity)
@@ -342,9 +351,9 @@ fn run() -> Result<()> {
             let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
             let _ = idx.log_stat("refs", out.len(), &paths);
         }
-        Cmd::Related { file } => {
+        Cmd::Related { file, depth } => {
             let rel = idx.rel_path(&file)?;
-            let info = idx.related(&rel)?;
+            let info = idx.related(&rel, depth)?;
             let out = if cli.json {
                 format!("{}\n", serde_json::to_string_pretty(&info)?)
             } else {
@@ -355,6 +364,20 @@ fn run() -> Result<()> {
             paths.extend(info.internal_deps.iter().map(String::as_str));
             paths.extend(info.used_by.iter().map(String::as_str));
             let _ = idx.log_stat("related", out.len(), &paths);
+        }
+        Cmd::Cycles { dir } => {
+            let cycles = idx.cycles(dir.as_deref())?;
+            let out = if cli.json {
+                format!("{}\n", serde_json::to_string_pretty(&cycles)?)
+            } else {
+                format::cycles(&cycles)
+            };
+            print!("{out}");
+            let paths: Vec<&str> = cycles
+                .iter()
+                .flat_map(|c| c.iter().map(String::as_str))
+                .collect();
+            let _ = idx.log_stat("cycles", out.len(), &paths);
         }
         Cmd::Gain => {
             let rows = idx.gain()?;
