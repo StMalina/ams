@@ -710,7 +710,7 @@ impl Index {
         Ok(out)
     }
 
-    pub fn related(&self, rel: &str) -> Result<RelatedInfo> {
+    pub fn related(&self, rel: &str, depth: u32) -> Result<RelatedInfo> {
         let file_id = self.file_id(rel)?;
         let mut internal = Vec::new();
         let mut external = Vec::new();
@@ -733,12 +733,99 @@ impl Index {
         internal.dedup();
         external.sort();
         external.dedup();
+        let used_by = self.used_by(file_id)?;
+
+        // Levels 2..=depth: BFS over reverse-import edges, each ring rolled up
+        // by directory. Level 1 (`used_by`) stays a plain file list — that is
+        // what breaks; deeper rings are awareness, counts suffice.
+        let mut impact = Vec::new();
+        let mut seen: HashSet<String> = used_by.iter().cloned().collect();
+        seen.insert(rel.to_string());
+        let mut frontier = used_by.clone();
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT f2.path FROM imports i
+             JOIN files f2 ON f2.id = i.file_id
+             JOIN files f1 ON f1.id = i.resolved_file_id
+             WHERE f1.path = ?1",
+        )?;
+        for level in 2..=depth {
+            let mut next = Vec::new();
+            for f in &frontier {
+                let importers: Vec<String> = stmt
+                    .query_map(params![f], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for p in importers {
+                    if seen.insert(p.clone()) {
+                        next.push(p);
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            let mut dirs: HashMap<String, u32> = HashMap::new();
+            for p in &next {
+                let dir = match p.rsplit_once('/') {
+                    Some((d, _)) => format!("{d}/"),
+                    None => "./".to_string(),
+                };
+                *dirs.entry(dir).or_default() += 1;
+            }
+            let mut dirs: Vec<(String, u32)> = dirs.into_iter().collect();
+            dirs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            impact.push(ImpactLevel {
+                level,
+                total: next.len() as u32,
+                dirs,
+            });
+            frontier = next;
+        }
+        drop(stmt);
+
         Ok(RelatedInfo {
             path: rel.to_string(),
             internal_deps: internal,
             external_deps: external,
-            used_by: self.used_by(file_id)?,
+            used_by,
+            impact,
         })
+    }
+
+    /// Module-level dependency cycles: strongly connected components of the
+    /// resolved-import graph (plus self-loops). Members only — deriving the
+    /// exact edge order inside a knot is the reader's judgment call anyway.
+    pub fn cycles(&self, dir_prefix: Option<&str>) -> Result<Vec<Vec<String>>> {
+        let rows: Vec<(i64, i64)> = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT i.file_id, i.resolved_file_id FROM imports i
+                 WHERE i.resolved_file_id IS NOT NULL AND i.resolved_file_id != i.file_id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let paths: HashMap<i64, String> = self
+            .conn
+            .prepare("SELECT id, path FROM files")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut sccs = strongly_connected(&rows);
+        sccs.retain(|c| c.len() > 1);
+        let mut out: Vec<Vec<String>> = sccs
+            .into_iter()
+            .map(|c| {
+                let mut names: Vec<String> =
+                    c.iter().filter_map(|id| paths.get(id).cloned()).collect();
+                names.sort();
+                names
+            })
+            .filter(|names| match dir_prefix {
+                Some(d) => names.iter().any(|p| p.starts_with(d)),
+                None => true,
+            })
+            .collect();
+        out.sort_by_key(|c| std::cmp::Reverse(c.len()));
+        Ok(out)
     }
 
     /// Attach an LLM-written doc to `rel:symbol_path`. Bound to the current
@@ -921,9 +1008,10 @@ fn split_ident(name: &str) -> String {
 }
 
 /// Resolve import targets to indexed files. JS/TS `./relative`, Python
-/// dotted/relative modules, Rust `crate::` paths, PHP relative paths and
-/// PSR-4 namespaces (composer.json). Go module paths need go.mod context
-/// and stay unresolved for now.
+/// dotted/relative modules, Rust module paths (`crate::`/`super::`/`self::`
+/// plus workspace members by crate name), PHP relative paths and PSR-4
+/// namespaces (composer.json), Go module paths (go.mod), JVM and Ruby
+/// conventions.
 fn resolve_imports(tx: &rusqlite::Transaction, root: &Path) -> Result<()> {
     let files: HashMap<String, i64> = tx
         .prepare("SELECT path, id FROM files")?
@@ -939,6 +1027,7 @@ fn resolve_imports(tx: &rusqlite::Transaction, root: &Path) -> Result<()> {
             text.lines()
                 .find_map(|l| l.trim().strip_prefix("module ").map(|m| m.trim().to_string()))
         });
+    let crate_roots = rust_crate_roots(&files);
 
     let rows: Vec<(i64, String, String, String)> = tx
         .prepare(
@@ -951,7 +1040,7 @@ fn resolve_imports(tx: &rusqlite::Transaction, root: &Path) -> Result<()> {
     for (rowid, from, target, lang) in rows {
         let resolved = match lang.as_str() {
             "py" => resolve_python(&files, &from, &target),
-            "rs" => resolve_rust(&files, &target),
+            "rs" => resolve_rust(&files, &crate_roots, &from, &target),
             "php" => resolve_php(&files, &from, &target, &psr4),
             "go" => go_module
                 .as_deref()
@@ -1164,17 +1253,124 @@ fn resolve_ruby(files: &HashMap<String, i64>, from: &str, target: &str) -> Optio
         .or_else(|| files.get(&format!("{target}.rb")).copied())
 }
 
-fn resolve_rust(files: &HashMap<String, i64>, target: &str) -> Option<i64> {
-    let path = target.strip_prefix("crate::")?;
-    // use crate::a::b::Item — Item may be a symbol, not a module; try both depths
-    let segs: Vec<&str> = path.split("::").collect();
-    let mut candidates = Vec::new();
+/// Workspace members: any `**/src/lib.rs` marks a crate root, addressable by
+/// its directory name with `-` → `_` (the cargo default; crates whose
+/// Cargo.toml name differs from the directory stay unresolved).
+fn rust_crate_roots(files: &HashMap<String, i64>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for path in files.keys() {
+        let Some(prefix) = path.strip_suffix("src/lib.rs") else {
+            continue;
+        };
+        let dir = prefix.trim_end_matches('/');
+        let name = dir.rsplit('/').next().unwrap_or(dir).replace('-', "_");
+        if !name.is_empty() {
+            out.insert(name, format!("{prefix}src"));
+        }
+    }
+    out
+}
+
+/// The `src` directory the file's crate lives under ("crates/ams-core/src"
+/// for "crates/ams-core/src/parser/mod.rs"), so `crate::` works for
+/// workspace members, not just a repo-root `src/`.
+fn rust_src_root(from: &str) -> Option<String> {
+    let comps: Vec<&str> = from.split('/').collect();
+    let idx = comps.iter().rposition(|c| *c == "src")?;
+    Some(comps[..=idx].join("/"))
+}
+
+/// Directory holding the child modules of `from`'s own module:
+/// `src/parser/mod.rs` → `src/parser`, `src/parser/go.rs` → `src/parser/go`.
+fn rust_self_dir(from: &str) -> String {
+    let p = Path::new(from);
+    let dir = p.parent().unwrap_or(Path::new("")).to_string_lossy().replace('\\', "/");
+    match p.file_stem().and_then(|s| s.to_str()) {
+        Some("mod") | Some("lib") | Some("main") | None => dir,
+        Some(stem) => {
+            if dir.is_empty() {
+                stem.to_string()
+            } else {
+                format!("{dir}/{stem}")
+            }
+        }
+    }
+}
+
+/// Walk `segs` as module path under `base`. The trailing segments may be
+/// symbols rather than modules (`use crate::a::b::Item`), so every depth is
+/// tried, down to the module file of `base` itself when `allow_base` — that
+/// last step is only sound when `base` is a known anchor (crate/self/super);
+/// for the sibling-module guess it would resolve any external crate to the
+/// importing file itself.
+fn rust_lookup(
+    files: &HashMap<String, i64>,
+    base: &str,
+    segs: &[&str],
+    allow_base: bool,
+) -> Option<i64> {
+    let join = |p: &str| {
+        if base.is_empty() {
+            p.to_string()
+        } else {
+            format!("{base}/{p}")
+        }
+    };
     for depth in (1..=segs.len()).rev() {
         let p = segs[..depth].join("/");
-        candidates.push(format!("src/{p}.rs"));
-        candidates.push(format!("src/{p}/mod.rs"));
+        for cand in [join(&format!("{p}.rs")), join(&format!("{p}/mod.rs"))] {
+            if let Some(id) = files.get(&cand) {
+                return Some(*id);
+            }
+        }
     }
-    candidates.iter().find_map(|c| files.get(c).copied())
+    // Every segment was a symbol — the import points at `base`'s module file.
+    if allow_base {
+        for cand in [join("mod.rs"), join("lib.rs"), join("main.rs"), format!("{base}.rs")] {
+            if let Some(id) = files.get(&cand) {
+                return Some(*id);
+            }
+        }
+    }
+    None
+}
+
+/// `crate::` resolves inside the file's own crate (nearest `src` ancestor, so
+/// workspace members work); `super::`/`self::` walk the module tree; a bare
+/// leading identifier is tried as a workspace member (cross-crate `use
+/// ams_core::…`), then as a sibling module (2018 uniform paths / `pub use`).
+fn resolve_rust(
+    files: &HashMap<String, i64>,
+    crate_roots: &HashMap<String, String>,
+    from: &str,
+    target: &str,
+) -> Option<i64> {
+    let segs: Vec<&str> = target.split("::").filter(|s| !s.is_empty()).collect();
+    let (first, rest) = segs.split_first()?;
+    match *first {
+        "crate" => rust_lookup(files, &rust_src_root(from)?, rest, true),
+        "self" => rust_lookup(files, &rust_self_dir(from), rest, true),
+        "super" => {
+            // Children dir of the parent module; each extra `super` climbs one.
+            let mut rest = rest;
+            let p = Path::new(from);
+            let mut dir = match p.file_stem().and_then(|s| s.to_str()) {
+                Some("mod") | Some("lib") | Some("main") => {
+                    p.parent().and_then(Path::parent).unwrap_or(Path::new(""))
+                }
+                _ => p.parent().unwrap_or(Path::new("")),
+            };
+            while rest.first() == Some(&"super") {
+                dir = dir.parent().unwrap_or(Path::new(""));
+                rest = &rest[1..];
+            }
+            rust_lookup(files, &dir.to_string_lossy().replace('\\', "/"), rest, true)
+        }
+        name => crate_roots
+            .get(name)
+            .and_then(|root| rust_lookup(files, root, rest, true))
+            .or_else(|| rust_lookup(files, &rust_self_dir(from), &segs, false)),
+    }
 }
 
 /// Parse large files (over this) in sync()'s deferred second pass, after the
@@ -1201,6 +1397,67 @@ fn delete_file_rows(tx: &rusqlite::Transaction, rel: &str) -> Result<()> {
     )?;
     tx.execute("DELETE FROM files WHERE path = ?1", params![rel])?;
     Ok(())
+}
+
+/// Kosaraju SCC over the edge list; DFS kept iterative so a deep import
+/// chain cannot blow the stack on a large repo.
+fn strongly_connected(edges: &[(i64, i64)]) -> Vec<Vec<i64>> {
+    let mut fwd: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut rev: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut nodes: Vec<i64> = Vec::new();
+    for &(a, b) in edges {
+        fwd.entry(a).or_default().push(b);
+        rev.entry(b).or_default().push(a);
+        nodes.push(a);
+        nodes.push(b);
+    }
+    nodes.sort_unstable();
+    nodes.dedup();
+
+    // Pass 1: forward-graph finish order.
+    let mut visited: HashSet<i64> = HashSet::new();
+    let mut order: Vec<i64> = Vec::new();
+    for &start in &nodes {
+        if !visited.insert(start) {
+            continue;
+        }
+        let mut stack: Vec<(i64, usize)> = vec![(start, 0)];
+        while let Some(top) = stack.last_mut() {
+            let (node, i) = (top.0, top.1);
+            let succs = fwd.get(&node).map(|v| v.as_slice()).unwrap_or(&[]);
+            if i < succs.len() {
+                top.1 += 1;
+                let next = succs[i];
+                if visited.insert(next) {
+                    stack.push((next, 0));
+                }
+            } else {
+                order.push(node);
+                stack.pop();
+            }
+        }
+    }
+
+    // Pass 2: reverse graph in reverse finish order.
+    let mut assigned: HashSet<i64> = HashSet::new();
+    let mut sccs: Vec<Vec<i64>> = Vec::new();
+    for &start in order.iter().rev() {
+        if !assigned.insert(start) {
+            continue;
+        }
+        let mut comp = vec![start];
+        let mut stack = vec![start];
+        while let Some(node) = stack.pop() {
+            for &prev in rev.get(&node).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if assigned.insert(prev) {
+                    comp.push(prev);
+                    stack.push(prev);
+                }
+            }
+        }
+        sccs.push(comp);
+    }
+    sccs
 }
 
 /// Lexical path normalization (resolves `.` and `..` without touching the fs).
@@ -1273,6 +1530,45 @@ mod tests {
         files.insert("chi.go".to_string(), 5_i64);
         let mv = "github.com/go-chi/chi/v5";
         assert_eq!(resolve_go(&files, mv, "github.com/go-chi/chi/v5"), Some(5));
+    }
+
+    #[test]
+    fn rust_import_lookup() {
+        let mut files = HashMap::new();
+        for (i, p) in [
+            "crates/ams-core/src/lib.rs",
+            "crates/ams-core/src/index.rs",
+            "crates/ams-core/src/model.rs",
+            "crates/ams-core/src/parser/mod.rs",
+            "crates/ams-core/src/parser/go.rs",
+            "crates/ams-cli/src/main.rs",
+            "src/lib.rs",
+            "src/util.rs",
+        ]
+        .iter()
+        .enumerate()
+        {
+            files.insert(p.to_string(), i as i64);
+        }
+        let roots = rust_crate_roots(&files);
+        let r = |from: &str, t: &str| resolve_rust(&files, &roots, from, t);
+
+        // crate:: inside a workspace member — not just a repo-root src/
+        assert_eq!(r("crates/ams-core/src/index.rs", "crate::model::ParsedFile"), Some(2));
+        assert_eq!(r("crates/ams-core/src/parser/go.rs", "crate::parser::mod"), Some(3));
+        // cross-crate: directory name, `-` → `_`
+        assert_eq!(r("crates/ams-cli/src/main.rs", "ams_core::model::SymbolKind"), Some(2));
+        // integration tests import the crate by name too
+        assert_eq!(r("crates/ams-core/tests/parsers.rs", "ams_core::model::SymbolKind"), Some(2));
+        // super:: from a leaf module lands on the parent's module file
+        assert_eq!(r("crates/ams-core/src/parser/go.rs", "super::node_text"), Some(3));
+        // super:: from mod.rs climbs to the crate root file
+        assert_eq!(r("crates/ams-core/src/parser/mod.rs", "super::model::RefKind"), Some(2));
+        // 2018 uniform path / `pub use` of a sibling module
+        assert_eq!(r("crates/ams-core/src/lib.rs", "index::{Index, SyncStats}"), Some(1));
+        // repo-root crate still works, and externals stay unresolved
+        assert_eq!(r("src/lib.rs", "crate::util::helper"), Some(7));
+        assert_eq!(r("crates/ams-core/src/index.rs", "anyhow::Result"), None);
     }
 
     #[test]

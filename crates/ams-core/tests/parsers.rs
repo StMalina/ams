@@ -51,7 +51,25 @@ fn call_things() {
     add(1, 2);
     Point::new();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::helpers::fixture;
+    use crate::other::Thing;
+}
 "#;
+
+#[test]
+fn rust_inline_mod_imports_shift_frame() {
+    let out = RustParser.parse(RUST_SRC).unwrap();
+    // `super::*` inside an inline mod points at this very file — no edge.
+    assert!(out.imports.iter().all(|i| !i.starts_with("super::")));
+    // `super::helpers::…` is the file's own child module.
+    assert!(out.imports.iter().any(|i| i == "self::helpers::fixture"));
+    // `crate::…` passes through untouched.
+    assert!(out.imports.iter().any(|i| i == "crate::other::Thing"));
+}
 
 #[test]
 fn rust_parses_top_level_function() {

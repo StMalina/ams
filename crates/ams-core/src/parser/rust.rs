@@ -105,7 +105,18 @@ fn collect_top(node: Node, src: &str, out: &mut ParsedFile) {
                         collect_top(ch, src, &mut inner);
                     }
                     sym.children = inner.symbols;
-                    out.imports.extend(inner.imports);
+                    // An inline `mod` (tests, usually) sees this file as
+                    // `super` — shift its imports into the file's own frame
+                    // so `use super::*` doesn't read as an edge to the
+                    // file's parent module. Pure self-imports carry no edge.
+                    out.imports.extend(inner.imports.into_iter().filter_map(|imp| {
+                        match imp.strip_prefix("super::") {
+                            None => Some(imp),
+                            Some(rest) if rest.starts_with("super::") => Some(rest.to_string()),
+                            Some(rest) if rest.contains("::") => Some(format!("self::{rest}")),
+                            Some(_) => None,
+                        }
+                    }));
                     out.symbols.push(sym);
                 }
             }
