@@ -11,6 +11,7 @@ pub mod php;
 pub mod python;
 pub mod ruby;
 pub mod rust;
+pub mod sfc;
 pub mod typescript;
 
 pub trait LangParser: Send + Sync {
@@ -20,7 +21,7 @@ pub trait LangParser: Send + Sync {
 
 pub const SUPPORTED_EXTS: &[&str] = &[
     "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "go", "php", "java", "kt", "kts", "cs",
-    "rb",
+    "rb", "vue", "svelte", "astro",
 ];
 
 pub fn parser_for_ext(ext: &str) -> Option<&'static dyn LangParser> {
@@ -34,6 +35,9 @@ pub fn parser_for_ext(ext: &str) -> Option<&'static dyn LangParser> {
     static KT: kotlin::KotlinParser = kotlin::KotlinParser;
     static CS: csharp::CSharpParser = csharp::CSharpParser;
     static RB: ruby::RubyParser = ruby::RubyParser;
+    static VUE: sfc::SfcParser = sfc::SfcParser { format: sfc::SfcFormat::Vue };
+    static SVELTE: sfc::SfcParser = sfc::SfcParser { format: sfc::SfcFormat::Svelte };
+    static ASTRO: sfc::SfcParser = sfc::SfcParser { format: sfc::SfcFormat::Astro };
     Some(match ext {
         "ts" => &TS,
         "tsx" | "js" | "jsx" | "mjs" | "cjs" => &TSX,
@@ -45,6 +49,9 @@ pub fn parser_for_ext(ext: &str) -> Option<&'static dyn LangParser> {
         "kt" | "kts" => &KT,
         "cs" => &CS,
         "rb" => &RB,
+        "vue" => &VUE,
+        "svelte" => &SVELTE,
+        "astro" => &ASTRO,
         _ => return None,
     })
 }

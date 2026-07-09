@@ -56,6 +56,19 @@ fn collect_top(node: Node, src: &str, out: &mut ParsedFile) {
         "expression_statement" => {
             if let Some(expr) = node.named_child(0) {
                 collect_include(expr, src, out);
+                // `$handlers = [...]` / `$fn = fn() => ...` — route/handler maps
+                // and top-level closures assigned to a variable.
+                if expr.kind() == "assignment_expression" {
+                    collect_assignment_closures(expr, node, src, out);
+                }
+            }
+        }
+        // `return [ 'route' => function () {...} ]` — the Laravel-config shape.
+        "return_statement" => {
+            if let Some(v) = node.named_child(0) {
+                if v.kind() == "array_creation_expression" {
+                    out.symbols.extend(array_closures(v, src));
+                }
             }
         }
         // Legacy procedural PHP declares functions inside if/foreach/try
@@ -138,6 +151,113 @@ fn collect_top(node: Node, src: &str, out: &mut ParsedFile) {
         }
         _ => {}
     }
+}
+
+/// `$x = fn()=>… / function(){…} / [ ... ]` — a variable-bound closure or a map
+/// of closures. Mirrors the TS object-literal handling: closures become
+/// `Function`s named after their array key; the enclosing array becomes a
+/// `Const` parent named after the variable.
+fn collect_assignment_closures(assign: Node, stmt: Node, src: &str, out: &mut ParsedFile) {
+    let (Some(left), Some(right)) = (
+        assign.child_by_field_name("left"),
+        assign.child_by_field_name("right"),
+    ) else {
+        return;
+    };
+    if left.kind() != "variable_name" {
+        return;
+    }
+    let name = node_text(src, left).trim_start_matches('$').to_string();
+    let (start, end) = line_span(stmt);
+    match right.kind() {
+        "arrow_function" | "anonymous_function" => {
+            out.symbols.push(ParsedSymbol {
+                name,
+                kind: SymbolKind::Function,
+                signature: signature(src, stmt, right.child_by_field_name("body")),
+                start_line: start,
+                end_line: end,
+                exported: true,
+                body_hash: body_hash(src, stmt),
+                doc: preceding_doc(stmt, src),
+                children: vec![],
+            });
+        }
+        "array_creation_expression" => {
+            let children = array_closures(right, src);
+            if children.is_empty() {
+                return;
+            }
+            out.symbols.push(ParsedSymbol {
+                name,
+                kind: SymbolKind::Const,
+                signature: signature(src, stmt, Some(right)),
+                start_line: start,
+                end_line: end,
+                exported: true,
+                body_hash: body_hash(src, stmt),
+                doc: preceding_doc(stmt, src),
+                children,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Closures assigned to array keys: `[ 'foo' => fn()=>…, 'bar' => function(){…} ]`.
+/// Each keyed closure is a `Function` named after the (unquoted) key; a nested
+/// array becomes a `Const` parent carrying its own closures. Non-closure entries
+/// are skipped, so plain data arrays yield nothing.
+fn array_closures(array: Node, src: &str) -> Vec<ParsedSymbol> {
+    let mut out = Vec::new();
+    let mut cursor = array.walk();
+    for el in array.named_children(&mut cursor) {
+        if el.kind() != "array_element_initializer" {
+            continue;
+        }
+        let mut c2 = el.walk();
+        let kids: Vec<Node> = el.named_children(&mut c2).collect();
+        if kids.len() != 2 {
+            continue; // need a `key => value` pair
+        }
+        let (key, value) = (kids[0], kids[1]);
+        let name = unquote(node_text(src, key));
+        let (start, end) = line_span(el);
+        match value.kind() {
+            "arrow_function" | "anonymous_function" => {
+                out.push(ParsedSymbol {
+                    name,
+                    kind: SymbolKind::Function,
+                    signature: signature(src, el, value.child_by_field_name("body")),
+                    start_line: start,
+                    end_line: end,
+                    exported: true,
+                    body_hash: body_hash(src, el),
+                    doc: preceding_doc(el, src),
+                    children: vec![],
+                });
+            }
+            "array_creation_expression" => {
+                let children = array_closures(value, src);
+                if children.is_empty() {
+                    continue;
+                }
+                out.push(ParsedSymbol {
+                    name,
+                    kind: SymbolKind::Const,
+                    signature: signature(src, el, Some(value)),
+                    start_line: start,
+                    end_line: end,
+                    exported: true,
+                    body_hash: body_hash(src, el),
+                    doc: preceding_doc(el, src),
+                    children,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// `use Foo\Bar;` and grouped `use Foo\{Bar, Baz as B};`. Aliases are dropped

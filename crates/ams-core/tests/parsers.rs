@@ -530,6 +530,59 @@ fn php_functions_inside_control_flow_blocks() {
     assert_eq!((f.start_line, f.end_line), (3, 5));
 }
 
+const PHP_CLOSURE_SRC: &str = r#"<?php
+
+$handlers = [
+    'foo' => fn($x) => $x + 1,
+    'bar' => function ($req) { return $req; },
+];
+
+$fn = fn() => 42;
+"#;
+
+#[test]
+fn php_parses_array_of_closures() {
+    let out = PhpParser.parse(PHP_CLOSURE_SRC).unwrap();
+
+    let handlers = find(&out.symbols, "handlers");
+    assert_eq!(handlers.kind, SymbolKind::Const);
+    assert!(handlers.exported);
+    assert_eq!(handlers.start_line, 3);
+
+    let foo = find(&handlers.children, "foo");
+    assert_eq!(foo.kind, SymbolKind::Function);
+    assert_eq!(foo.start_line, 4);
+
+    let bar = find(&handlers.children, "bar");
+    assert_eq!(bar.kind, SymbolKind::Function);
+    assert_eq!(bar.start_line, 5);
+
+    // Top-level closure bound to a variable: `$fn` -> `fn` (no leading `$`).
+    let f = find(&out.symbols, "fn");
+    assert_eq!(f.kind, SymbolKind::Function);
+    assert_eq!(f.start_line, 8);
+}
+
+#[test]
+fn php_parses_return_array_of_closures() {
+    use ams_core::model::RefKind;
+    let php = "<?php\nreturn [\n    'route' => function ($req) { return handle($req); },\n];\n";
+    let out = PhpParser.parse(php).unwrap();
+
+    let route = find(&out.symbols, "route");
+    assert_eq!(route.kind, SymbolKind::Function);
+    assert_eq!(route.start_line, 3);
+
+    // Refs inside the closure body are still collected.
+    assert!(
+        out.refs
+            .iter()
+            .any(|r| r.name == "handle" && r.kind == RefKind::Call && r.line == 3),
+        "refs: {:?}",
+        out.refs
+    );
+}
+
 // ---------------------------------------------------------------------
 // Docstrings / doc comments
 
