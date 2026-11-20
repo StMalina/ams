@@ -263,7 +263,9 @@ Read/Grep, and four hooks (`plugin/hooks/`):
   file with two exports passes straight through while a 2000-line hub file
   is intercepted. Repeating the same `Read` passes (so `Edit` chains keep
   working); targeted reads, small files, and unindexed projects are never
-  touched. Opt out with `AMS_NO_READ_GUARD=1`.
+  touched. In Claude Code's Code Mode the read guard never blocks: `edit()`
+  reads the whole file exactly like `file().text()` does, and a block would
+  break the edit. Opt out with `AMS_NO_READ_GUARD=1`.
 - `PreToolUse` on `Grep` — the **grep guard**: a Grep whose pattern is a
   bare identifier (camelCase / snake_case) that exists in the index is
   intercepted once and answered with `ams find` output — exact definitions

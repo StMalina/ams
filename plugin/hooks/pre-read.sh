@@ -27,12 +27,18 @@ ti = d.get("tool_input") or {}
 print("FILE=%s" % shlex.quote(str(ti.get("file_path") or "")))
 spanned = ti.get("offset") is not None or ti.get("limit") is not None
 print("SPANNED=%s" % ("1" if spanned else "0"))
+print("REPL=%s" % ("1" if str(d.get("tool_use_id") or "").startswith("repl_") else "0"))
 print("SID=%s" % shlex.quote(str(d.get("session_id") or "nosession")))
 ' 2>/dev/null)" 2>/dev/null || exit 0
 
 [ -n "${FILE:-}" ] || exit 0
 # A Read that already targets a span is exactly the behavior we want.
 [ "${SPANNED:-1}" = "0" ] || exit 0
+# Code Mode (call from a REPL script, tool_use_id repl_*): edit() does its own
+# full Read of the file, indistinguishable from file().text(), so a block
+# breaks the edit and buys nothing. shortcut: no read guard in Code Mode;
+# revisit if Code Mode starts marking edit-internal reads.
+[ "${REPL:-0}" = "1" ] && exit 0
 
 case "$FILE" in
     /*) ;;
