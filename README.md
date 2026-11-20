@@ -235,7 +235,10 @@ When the annotated symbol's body changes, the note is kept but shown with a
 
 **Claude Code plugin** — `ams init` installs it automatically when you pick
 Claude Code and the `claude` CLI is on PATH (opt out with `AMS_NO_PLUGIN=1`;
-removed again by `ams init --uninstall`). Manual install from this repo (it
+removed again by `ams init --uninstall`). Picking Claude Code also adds
+allow rules for the read-only queries (`Bash(ams describe *)`, `find`,
+`tree`, …) to `~/.claude/settings.json`: a hook cannot lift plan-mode prompts
+for calls inside Code Mode scripts, a permission rule can. Manual install from this repo (it
 doubles as a plugin marketplace):
 
 ```
@@ -277,7 +280,13 @@ Read/Grep, and four hooks (`plugin/hooks/`):
   including `rtk`/`sudo`-wrapped ones) so plan mode — which otherwise denies
   every shell call — never blocks the workflow; anything chaining a second
   command (`ams find x && …`) or writing (`ams build`, `ams init`) is left to
-  the normal permission flow.
+  the normal permission flow. One leading `cd <dir> &&` (how Code Mode runs a
+  command in another directory) is accepted; redirects, `$(…)`, backticks and
+  env/path overrides are not.
+
+Each PreToolUse hook declares `timeout: 15` and `onFailure: continue`: in
+Claude Code's Code Mode a hook that times out or crashes refuses the tool
+call, and a guard must never cost the agent a call.
 
 The guard exists because passive hints lose to habit: agents trained on
 grep-and-read keep grepping and reading even with the skill available. The

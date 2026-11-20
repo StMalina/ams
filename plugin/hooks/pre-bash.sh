@@ -31,7 +31,7 @@ if not cmd:
 
 # Read-only ams queries carry no side effects; auto-approve them so plan mode
 # (which otherwise denies every Bash call) never blocks the ams workflow.
-AMS_READONLY = {"describe", "tree", "find", "refs", "search", "related", "gain"}
+AMS_READONLY = {"describe", "tree", "find", "refs", "search", "related", "cycles", "gain"}
 
 def unwrap(tokens):
     """Strip env-var prefixes and command wrappers (rtk/sudo/env/...)."""
@@ -47,15 +47,23 @@ def unwrap(tokens):
         break
     return tokens
 
-# Only a lone ams query (no operators chaining a second command) is allowed —
-# `ams find x && rm -rf y` must not slip through.
-segments = [s for s in re.split(r"&&|\|\||[;|]", cmd) if s.strip()]
-if len(segments) == 1:
+# Only a lone ams query is allowed. One leading `cd <dir> &&` is accepted:
+# Code Mode runs `$`...`.cwd(d)` as `cd <quoted d> && cmd`. Any other shell
+# metacharacter (chaining, $(...), backticks, redirects) goes to the normal
+# permission flow, so `ams find x > ~/.bashrc` cannot ride on the allow.
+q = re.sub(r"^\s*cd\s+(?:\x27[^\x27]*\x27|[\w./~-]+)\s*&&\s*", "", cmd, count=1)
+if not re.search(r"[;&|<>`$()\n]", q):
     try:
-        toks = unwrap(shlex.split(segments[0].strip()))
+        toks = shlex.split(q)
     except ValueError:
         toks = []
-    if len(toks) >= 2 and toks[0].rsplit("/", 1)[-1] == "ams" and toks[1] in AMS_READONLY:
+    # Exact `ams` only (optionally via rtk / rtk proxy / sudo): env prefixes
+    # and paths could point at another binary.
+    if toks[:2] == ["rtk", "proxy"]:
+        toks = toks[2:]
+    elif toks[:1] in (["rtk"], ["sudo"]):
+        toks = toks[1:]
+    if len(toks) >= 2 and toks[0] == "ams" and toks[1] in AMS_READONLY:
         print("ALLOW=1")
         sys.exit(0)
 

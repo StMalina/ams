@@ -241,7 +241,8 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
 
 fn backup(path: &Path) -> Result<bool> {
     if path.exists() {
-        fs::copy(path, path.with_extension("md.bak"))
+        let name = format!("{}.bak", path.file_name().unwrap_or_default().to_string_lossy());
+        fs::copy(path, path.with_file_name(name))
             .with_context(|| format!("backing up {}", path.display()))?;
         return Ok(true);
     }
@@ -692,6 +693,89 @@ fn claude_plugin(install: bool) {
     }
 }
 
+/// Read-only ams queries pre-approved in Claude Code's user settings. A hook's
+/// `permissionDecision: allow` does not lift plan-mode prompts for calls made
+/// inside Code Mode scripts; permission rules do.
+const AMS_ALLOW: [&str; 8] = [
+    "Bash(ams describe *)",
+    "Bash(ams tree *)",
+    "Bash(ams find *)",
+    "Bash(ams refs *)",
+    "Bash(ams search *)",
+    "Bash(ams related *)",
+    "Bash(ams cycles *)",
+    "Bash(ams gain *)",
+];
+
+/// Add (install) or remove (uninstall) the AMS_ALLOW rules in a settings.json
+/// body. Ok(None) = nothing to change. Err = not a JSON object: a file we could
+/// not parse is never rewritten.
+fn edit_allow_rules(content: &str, install: bool) -> Result<Option<String>> {
+    let mut root: serde_json::Value = if content.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(content).context("not valid JSON")?
+    };
+    let allow = root
+        .as_object_mut()
+        .context("not a JSON object")?
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("permissions is not an object")?
+        .entry("allow")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("permissions.allow is not an array")?;
+    let before = allow.len();
+    if install {
+        for rule in AMS_ALLOW {
+            if !allow.iter().any(|v| v.as_str() == Some(rule)) {
+                allow.push(rule.into());
+            }
+        }
+    } else {
+        allow.retain(|v| !v.as_str().is_some_and(|s| AMS_ALLOW.contains(&s)));
+    }
+    if allow.len() == before {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string_pretty(&root)? + "\n"))
+}
+
+/// Pre-approve the read-only ams queries in ~/.claude/settings.json (see
+/// AMS_ALLOW). Fail-soft: an unreadable or unparsable file is left untouched
+/// with a printed hint.
+fn claude_permissions(install: bool) {
+    let Ok(dir) = Agent::Claude.config_dir() else {
+        return;
+    };
+    let path = dir.join("settings.json");
+    let current = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            println!("note: {} not readable ({e}) — ams allow rules not changed", path.display());
+            return;
+        }
+    };
+    match edit_allow_rules(&current, install) {
+        Ok(Some(new)) => {
+            if let Err(e) = write_if_changed(&path, &current, new, "permissions.allow (ams rules)") {
+                println!("note: {e:#}");
+            }
+        }
+        Ok(None) if install => {
+            println!("[ok] {} ams allow rules already in place", path.display())
+        }
+        Ok(None) => {}
+        Err(e) => println!(
+            "note: {} left untouched ({e:#}) — add \"Bash(ams *)\" to permissions.allow so plan mode does not prompt for ams queries",
+            path.display()
+        ),
+    }
+}
+
 pub fn run(show: bool, uninstall: bool, agents: Option<String>) -> Result<()> {
     if show {
         for a in ALL_AGENTS {
@@ -709,6 +793,7 @@ pub fn run(show: bool, uninstall: bool, agents: Option<String>) -> Result<()> {
         }
         if targets.contains(&Agent::Claude) {
             claude_plugin(false);
+            claude_permissions(false);
         }
         return Ok(());
     }
@@ -749,9 +834,11 @@ pub fn run(show: bool, uninstall: bool, agents: Option<String>) -> Result<()> {
         }
     }
     // Picking Claude Code means the whole Claude Code setup — the plugin's
-    // guards and skill are what make agents actually use ams.
+    // guards and skill are what make agents actually use ams, the allow rules
+    // keep plan mode from prompting for its read-only queries.
     if targets.contains(&Agent::Claude) {
         claude_plugin(true);
+        claude_permissions(true);
     }
     println!(
         "\nDone. Undo anytime: ams init --uninstall; status: ams init --show"
@@ -775,6 +862,27 @@ mod tests {
     fn own_file_content_has_frontmatter_only_for_vscode() {
         assert!(Agent::CopilotVscode.own_file_content().starts_with("---\napplyTo: '**'"));
         assert_eq!(Agent::Roo.own_file_content(), AMS_MD);
+    }
+
+    #[test]
+    fn allow_rules_keep_order_and_are_idempotent() {
+        let src = "{\n  \"model\": \"opus\",\n  \"permissions\": {\n    \"allow\": [\"Bash(git *)\"]\n  },\n  \"env\": {}\n}\n";
+        let out = edit_allow_rules(src, true).unwrap().unwrap();
+        // preserve_order: user keys stay where they were, not re-sorted.
+        assert!(out.find("\"model\"").unwrap() < out.find("\"permissions\"").unwrap());
+        assert!(out.find("\"permissions\"").unwrap() < out.find("\"env\"").unwrap());
+        assert!(out.contains("Bash(git *)") && out.contains("Bash(ams find *)"));
+        assert_eq!(edit_allow_rules(&out, true).unwrap(), None);
+        let back = edit_allow_rules(&out, false).unwrap().unwrap();
+        assert!(back.contains("Bash(git *)") && !back.contains("ams"));
+        assert_eq!(edit_allow_rules("{}", false).unwrap(), None);
+    }
+
+    #[test]
+    fn allow_rules_refuse_unparsable_settings() {
+        assert!(edit_allow_rules("{ // jsonc\n}", true).is_err());
+        assert!(edit_allow_rules("[]", true).is_err());
+        assert!(edit_allow_rules("", true).unwrap().unwrap().contains("Bash(ams tree *)"));
     }
 
     #[test]

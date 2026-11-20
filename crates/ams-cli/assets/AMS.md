@@ -8,7 +8,7 @@ once at the root (takes seconds). No `ams` binary → ignore this section.
 
 **Before Read on an unfamiliar code file:**
 1. `ams describe <file>` — signatures with exact `@start-end` spans, 10–40× cheaper than Read
-2. `Read(offset=start, limit=end-start+1)` — only the span you need, never the whole file
+2. `Read(offset=start, limit=end-start+1)` (Code Mode: `file(path).slice(start, end-start+1)`) — only the span you need, never the whole file
 
 **Before Grep for a symbol definition:** `ams find <name>` (exact spans, cross-language).
 **Orienting in a directory:** `ams tree <dir>` — instead of Glob + serial Reads; high `api`+`used-by` = hub file.

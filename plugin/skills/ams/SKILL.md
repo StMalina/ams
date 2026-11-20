@@ -45,7 +45,8 @@ out-of-band `ams annotate` note.
 
 **3. Read only the body you need — `Read` with the span**
 
-`@103-160` → `Read(file_path="src/auth.ts", offset=103, limit=58)`.
+`@103-160` → `Read(file_path="src/auth.ts", offset=103, limit=58)`
+(in Code Mode: `file("src/auth.ts").slice(103, 58)`).
 Never read a whole file when you already have its spans.
 
 ## Before changing any exported API

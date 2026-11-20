@@ -13,4 +13,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+      - run: bash tests/hooks/pre-bash-allow.sh
       - run: cargo build --release -p ams-cli

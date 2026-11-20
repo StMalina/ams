@@ -78,6 +78,6 @@ touch "$marker" 2>/dev/null
     echo
     echo "$out"
     echo
-    echo "Call sites: \`ams refs $PAT\`. Read a definition with Read(offset=start, limit=end-start+1) from a span above. If you really wanted a text search, repeat the exact same Grep — it will pass now."
+    echo "Call sites: \`ams refs $PAT\`. Read a definition with Read(offset=start, limit=end-start+1) (Code Mode: file(path).slice(start, end-start+1)) from a span above. If you really wanted a text search, repeat the exact same Grep — it will pass now."
 } >&2
 exit 2

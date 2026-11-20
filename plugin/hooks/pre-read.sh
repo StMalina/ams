@@ -85,6 +85,6 @@ touch "$marker" 2>/dev/null
     echo
     echo "$out"
     echo
-    echo "Read only the span you need: Read(file_path=\"$FILE\", offset=<start>, limit=<end - start + 1>) using an @start-end span above. If you really need the whole file, repeat the exact same Read — it will pass now."
+    echo "Read only the span you need: Read(file_path=\"$FILE\", offset=<start>, limit=<end - start + 1>) — in Code Mode file(\"$FILE\").slice(<start>, <end - start + 1>) — using an @start-end span above. If you really need the whole file, repeat the exact same call — it will pass now."
 } >&2
 exit 2

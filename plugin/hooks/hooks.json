@@ -4,9 +4,9 @@
       {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh"}]}
     ],
     "PreToolUse": [
-      {"matcher": "Read", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-read.sh"}]},
-      {"matcher": "Grep", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-grep.sh"}]},
-      {"matcher": "Bash", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-bash.sh"}]}
+      {"matcher": "Read", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-read.sh", "timeout": 15, "onFailure": "continue"}]},
+      {"matcher": "Grep", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-grep.sh", "timeout": 15, "onFailure": "continue"}]},
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-bash.sh", "timeout": 15, "onFailure": "continue"}]}
     ]
   }
 }
